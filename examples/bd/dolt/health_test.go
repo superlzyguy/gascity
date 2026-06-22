@@ -821,6 +821,86 @@ exit 0
 	}
 }
 
+func TestHealthScriptProbesExternalHostWhenLoopbackPortIsClosed(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeBin := t.TempDir()
+	invocationLog := filepath.Join(t.TempDir(), "dolt.log")
+
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), `#!/bin/sh
+exit 0
+`)
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
+exit 1
+`)
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), `#!/bin/sh
+exit 1
+`)
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), `#!/bin/sh
+{
+  printf 'args=%s\n' "$*"
+  printf 'password=%s\n' "${DOLT_CLI_PASSWORD:-}"
+} >> "$FAKE_DOLT_INVOCATION_LOG"
+case "$*" in
+  *"--host superlzy-dolt --port 3306 --user superlzy --no-tls sql -q SELECT 1"*)
+    exit 0
+    ;;
+esac
+exit 1
+`)
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(filteredEnv(
+		"FAKE_DOLT_INVOCATION_LOG",
+		"GC_CITY_PATH",
+		"GC_PACK_DIR",
+		"GC_DOLT_HOST",
+		"GC_DOLT_PORT",
+		"GC_DOLT_USER",
+		"GC_DOLT_PASSWORD",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN",
+		"PATH",
+	),
+		"FAKE_DOLT_INVOCATION_LOG="+invocationLog,
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=superlzy-dolt",
+		"GC_DOLT_PORT=3306",
+		"GC_DOLT_USER=superlzy",
+		"GC_DOLT_PASSWORD=secret",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Server struct {
+			Running   bool `json:"running"`
+			Reachable bool `json:"reachable"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+	}
+	if !report.Server.Running || !report.Server.Reachable {
+		t.Fatalf("server = %+v, want running and reachable\n%s", report.Server, out)
+	}
+	logData, err := os.ReadFile(invocationLog)
+	if err != nil {
+		t.Fatalf("read invocation log: %v", err)
+	}
+	logText := string(logData)
+	if !strings.Contains(logText, "--host superlzy-dolt --port 3306 --user superlzy") {
+		t.Fatalf("dolt invocation did not use external host/user:\n%s", logText)
+	}
+	if !strings.Contains(logText, "password=secret") {
+		t.Fatalf("dolt invocation did not export DOLT_CLI_PASSWORD:\n%s", logText)
+	}
+}
+
 func TestHealthScriptPortableTimestampFallbacksRemainNumeric(t *testing.T) {
 	tests := []struct {
 		name string

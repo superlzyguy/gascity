@@ -81,6 +81,15 @@ server_pid=0
 server_latency=0
 server_reachable=false
 
+host_is_local() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    ''|localhost|127.*|0.0.0.0|::1|\[::1\])
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 # Portable millisecond timestamp. BSD date(1) on macOS treats %N as a
 # literal 'N' (exits 0, output like "1776740122N"), so the GNU-only
 # || fallback never triggers. Feature-test the output instead.
@@ -94,9 +103,19 @@ now_ms() {
 
 # Find dolt PID by port.
 pid=$(managed_runtime_listener_pid "$GC_DOLT_PORT" || true)
+should_probe_sql=false
 if [ -n "$pid" ] || managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
   server_running=true
   [ -n "$pid" ] && server_pid="$pid"
+  should_probe_sql=true
+elif ! host_is_local "$host"; then
+  # External Dolt endpoints are not expected to listen on the caller's
+  # loopback interface. Probe SQL directly instead of treating a failed
+  # 127.0.0.1:$GC_DOLT_PORT check as authoritative.
+  should_probe_sql=true
+fi
+
+if [ "$should_probe_sql" = true ]; then
   # Measure query latency.
   start_ms=$(now_ms)
   conn_args="--host $host --port $GC_DOLT_PORT --user $GC_DOLT_USER --no-tls"
@@ -110,6 +129,7 @@ if [ -n "$pid" ] || managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
   # Bound the ping. A TCP-reachable but unresponsive server (stuck
   # goroutine, saturated pool, migration lock) would otherwise hang.
   if run_bounded 5 dolt $conn_args sql -q "SELECT 1" >/dev/null 2>&1; then
+    server_running=true
     server_reachable=true
     end_ms=$(now_ms)
     server_latency=$((end_ms - start_ms))

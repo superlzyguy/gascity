@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/doltauth"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -49,7 +52,8 @@ func preflightDatabaseProjectIDReader(cityPath string) func(scope string) (strin
 		if err != nil || !ok {
 			return "", false, err
 		}
-		db, err := managedDoltOpenDatabase(target.Host, target.Port, target.User, target.Database)
+		user, password := preflightDoltAuth(cityPath, scope, target)
+		db, err := managedDoltOpenDatabaseWithPassword(target.Host, target.Port, user, target.Database, password)
 		if err != nil {
 			return "", false, err
 		}
@@ -62,4 +66,11 @@ func preflightDatabaseProjectIDReader(cityPath string) func(scope string) (strin
 		}
 		return readDatabaseProjectID(ctx, db)
 	}
+}
+
+func preflightDoltAuth(cityPath, scope string, target contract.DoltConnectionTarget) (string, string) {
+	port, _ := strconv.Atoi(strings.TrimSpace(target.Port))
+	authScopeRoot := doltauth.AuthScopeRoot(cityPath, scope, target)
+	auth := doltauth.Resolve(authScopeRoot, strings.TrimSpace(target.User), strings.TrimSpace(target.Host), port)
+	return auth.User, auth.Password
 }
