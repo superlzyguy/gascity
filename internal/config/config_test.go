@@ -1826,6 +1826,9 @@ func TestEffectiveWorkQueryBD105CompatibilityOptIn(t *testing.T) {
 	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
 		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-ephemeral assigned probe: %q", got)
 	}
+	if !strings.Contains(got, `bd list --ready --include-infra --assignee="$id" --json --limit=1`) {
+		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-infra assigned-ready probe: %q", got)
+	}
 }
 
 func TestEffectiveWorkQueryBD104SurfacesLegacyEphemeralRoutedWork(t *testing.T) {
@@ -1917,6 +1920,9 @@ func TestEffectiveAssignedReadyQueryDefault(t *testing.T) {
 	if !strings.Contains(got, `bd ready --assignee="$id" --json --limit=1`) {
 		t.Fatalf("EffectiveAssignedReadyQuery() missing assigned-ready tier: %q", got)
 	}
+	if !strings.Contains(got, `bd list --ready --include-infra --assignee="$id" --json --limit=1`) {
+		t.Fatalf("EffectiveAssignedReadyQuery() missing include-infra assigned-ready tier: %q", got)
+	}
 	if strings.Contains(got, "gc.routed_to") {
 		t.Fatalf("EffectiveAssignedReadyQuery() should not include routed pool demand: %q", got)
 	}
@@ -1926,7 +1932,7 @@ func TestEffectiveAssignedReadyQueryDefault(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --assignee=worker-session --json --limit=1") printf '[{"id":"assigned-ready"}]' ;;
+  "list --ready --include-infra --assignee=worker-session --json --limit=1") printf '[{"id":"assigned-ready"}]' ;;
   *) printf '[]' ;;
 esac
 `)
@@ -1941,6 +1947,9 @@ func TestEffectiveAssignedReadyQueryForBeadsBD105Compatibility(t *testing.T) {
 	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
 		t.Fatalf("EffectiveAssignedReadyQueryForBeads(bd-1.0.5) missing include-ephemeral assigned-ready tier: %q", got)
 	}
+	if !strings.Contains(got, `bd list --ready --include-infra --assignee="$id" --json --limit=1`) {
+		t.Fatalf("EffectiveAssignedReadyQueryForBeads(bd-1.0.5) missing include-infra assigned-ready tier: %q", got)
+	}
 }
 
 func TestEffectiveAssignedInProgressQueryDefault(t *testing.T) {
@@ -1948,7 +1957,7 @@ func TestEffectiveAssignedInProgressQueryDefault(t *testing.T) {
 	got := a.EffectiveAssignedInProgressQuery()
 	for _, want := range []string{
 		`"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`,
-		`bd list --status in_progress --assignee="$id" --json --limit=1`,
+		`bd list --status in_progress --include-infra --assignee="$id" --json --limit=1`,
 		`ephemeral=true AND status=in_progress`,
 	} {
 		if !strings.Contains(got, want) {
@@ -1964,7 +1973,7 @@ func TestEffectiveAssignedInProgressQueryDefault(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "list --status in_progress --assignee=worker-bead --json --limit=1") printf '[{"id":"assigned-in-progress","ephemeral":true}]' ;;
+  "list --status in_progress --include-infra --assignee=worker-bead --json --limit=1") printf '[{"id":"assigned-in-progress","ephemeral":true}]' ;;
   *) printf '[]' ;;
 esac
 `)
@@ -2023,6 +2032,7 @@ func TestEffectiveAssignedReadyQueryControlDispatcherClaimsLegacyAssignedWork(t 
 	for _, want := range []string{
 		`case "$id" in *control-dispatcher)`,
 		`for cand in "$id" "$legacy"`,
+		`bd list --ready --include-infra --assignee="$cand"`,
 		`bd ready --assignee="$cand"`,
 	} {
 		if !strings.Contains(got, want) {
@@ -2039,6 +2049,14 @@ func TestEffectiveAssignedReadyQueryControlDispatcherClaimsLegacyAssignedWork(t 
 	}, `#!/bin/sh
 set -eu
 case "$*" in
+  "list --ready --include-infra --assignee=gascity--control-dispatcher --json --limit=1"|\
+  "list --ready --include-infra --assignee=gascity/control-dispatcher --json --limit=1")
+    printf '[]'
+    ;;
+  "list --ready --include-infra --assignee=gascity--workflow-control --json --limit=1"|\
+  "list --ready --include-infra --assignee=gascity/workflow-control --json --limit=1")
+    printf '[{"id":"ga-legacy-ready"}]'
+    ;;
   "ready --assignee=gascity--control-dispatcher --json --limit=1"|\
   "ready --assignee=gascity/control-dispatcher --json --limit=1")
     printf '[]'
@@ -2155,7 +2173,8 @@ func TestEffectiveWorkQueryControlDispatcherClaimsLegacyAssignedWork(t *testing.
 	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
 	got := a.EffectiveWorkQuery()
 	for _, want := range []string{
-		`bd list --status in_progress --assignee="$cand"`,
+		`bd list --status in_progress --include-infra --assignee="$cand"`,
+		`bd list --ready --include-infra --assignee="$cand"`,
 		`bd ready --assignee="$cand"`,
 	} {
 		if !strings.Contains(got, want) {
@@ -2168,11 +2187,19 @@ func TestEffectiveWorkQueryControlDispatcherClaimsLegacyAssignedWork(t *testing.
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "list --status in_progress --assignee=gascity--control-dispatcher --json --limit=1"|\
-  "list --status in_progress --assignee=gascity/control-dispatcher --json --limit=1"|\
-  "list --status in_progress --assignee=gascity--workflow-control --json --limit=1"|\
-  "list --status in_progress --assignee=gascity/workflow-control --json --limit=1")
+  "list --status in_progress --include-infra --assignee=gascity--control-dispatcher --json --limit=1"|\
+  "list --status in_progress --include-infra --assignee=gascity/control-dispatcher --json --limit=1"|\
+  "list --status in_progress --include-infra --assignee=gascity--workflow-control --json --limit=1"|\
+  "list --status in_progress --include-infra --assignee=gascity/workflow-control --json --limit=1")
     printf '[]'
+    ;;
+  "list --ready --include-infra --assignee=gascity--control-dispatcher --json --limit=1"|\
+  "list --ready --include-infra --assignee=gascity/control-dispatcher --json --limit=1")
+    printf '[]'
+    ;;
+  "list --ready --include-infra --assignee=gascity--workflow-control --json --limit=1"|\
+  "list --ready --include-infra --assignee=gascity/workflow-control --json --limit=1")
+    printf '[{"id":"ga-legacy-ready"}]'
     ;;
   "ready --assignee=gascity--workflow-control --json --limit=1"|\
   "ready --assignee=gascity/workflow-control --json --limit=1")
@@ -2216,7 +2243,8 @@ func TestEffectiveWorkQueryRoutedQueueUsesNativeOldestSortAcrossReadyTiers(t *te
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	got := a.EffectiveWorkQuery()
 	for _, want := range []string{
-		`bd list --status in_progress --assignee="$id"`,
+		`bd list --status in_progress --include-infra --assignee="$id"`,
+		`bd list --ready --include-infra --assignee="$id"`,
 		`bd ready --assignee="$id"`,
 	} {
 		if !strings.Contains(got, want) {
@@ -2346,7 +2374,8 @@ func TestEffectiveWorkQueryExcludesEpics(t *testing.T) {
 		// routed/pool tier still excludes epics (gc-udx guard)
 		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json`,
 		// assigned tiers carry NO epic exclusion
-		`bd list --status in_progress --assignee="$id" --json`,
+		`bd list --status in_progress --include-infra --assignee="$id" --json`,
+		`bd list --ready --include-infra --assignee="$id" --json`,
 		`bd ready --assignee="$id" --json`,
 		`-- hello-world/worker`,
 	}
@@ -2371,7 +2400,8 @@ func TestEffectiveWorkQueryExcludesEpicsControlDispatcher(t *testing.T) {
 	got := a.EffectiveWorkQuery()
 	wantPresent := []string{
 		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --json`,
-		`bd list --status in_progress --assignee="$cand" --json`,
+		`bd list --status in_progress --include-infra --assignee="$cand" --json`,
+		`bd list --ready --include-infra --assignee="$cand" --json`,
 		`bd ready --assignee="$cand" --json`,
 		`-- gascity/control-dispatcher gascity/workflow-control`,
 	}
@@ -2417,6 +2447,28 @@ esac
 `)
 	if !strings.Contains(out, "patrol-wisp") {
 		t.Fatalf("EffectiveWorkQuery() did not surface the self-assigned epic wisp (assigned tier still excludes epics?): %q", out)
+	}
+}
+
+func TestEffectiveWorkQueryAssignedTierSurfacesInfraMoleculeWisp(t *testing.T) {
+	a := Agent{Name: "deacon"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_NAME": "gastown.deacon",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  "list --status in_progress --include-infra --assignee=gastown.deacon --json --limit=1")
+    printf '[]' ;;
+  "list --ready --include-infra --assignee=gastown.deacon --json --limit=1")
+    printf '[{"id":"su-wisp-next","issue_type":"molecule","status":"open","assignee":"gastown.deacon"}]' ;;
+  *"--assignee=gastown.deacon"*)
+    printf '[]' ;;
+  *)
+    printf '[]' ;;
+esac
+`)
+	if !strings.Contains(out, "su-wisp-next") {
+		t.Fatalf("EffectiveWorkQuery() did not surface assigned infra molecule wisp: %q", out)
 	}
 }
 
