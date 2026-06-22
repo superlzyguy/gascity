@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +31,8 @@ const heartbeatMetadataKey = beadmeta.LastHeartbeatAtMetadataKey
 // the result to UTC, so an injected non-UTC clock still produces a UTC stamp.
 var bdHeartbeatNow = time.Now
 
+var repairBdDependencyTargetCompatibility = beads.RepairDependencyTargetCompatibilityAt
+
 // bdSilentFallbackExitCode is the exit code gc bd emits when it detects
 // that bd silently fell back to on-disk auto-import mode (managed Dolt
 // unreachable). Distinct from bd's own exits so operators and CI can
@@ -46,6 +49,8 @@ const bdSilentFallbackUserMessage = "gc bd: managed Dolt unreachable; bd fell ba
 // within the first chunk of stderr. Capping the retained prefix keeps memory
 // bounded for bd subcommands that stream large stderr output.
 const bdStderrScanLimit = 64 << 10 // 64 KiB
+
+const bdDependencyTargetCompatibilityRepairTimeout = 5 * time.Second
 
 // headLimitedWriter retains only the first limit bytes written to it and
 // discards the rest, so scanning bd's stderr for the silent-fallback marker
@@ -232,6 +237,19 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	env, err := bdCommandEnv(cityPath, cfg, target)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if bdCommandNeedsDependencyTargetCompatibilityRepair(bdArgs) &&
+		!scopeBackendIsPostgres(cityPath, target.ScopeRoot) &&
+		!scopeBackendIsDoltlite(cityPath, target.ScopeRoot) {
+		repairCtx, cancel := context.WithTimeout(context.Background(), bdDependencyTargetCompatibilityRepairTimeout)
+		_ = repairBdDependencyTargetCompatibility(repairCtx, target.ScopeRoot, runtimeEnvEntriesToMap(env))
+		cancel()
+	}
+
 	// Pre-flight exact-ID guard for write-mutating subcommands (gcy-g4o).
 	// bd's fuzzy/substring resolver can silently match a longer ID that
 	// contains the supplied ID as a substring (e.g. "gcy-dv7" → "gcy-wisp-dv78").
@@ -305,11 +323,6 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// (close path) — both go through this handoff.
 	stderrScan := &headLimitedWriter{limit: bdStderrScanLimit}
 	cmd.Stderr = io.MultiWriter(stderr, stderrScan)
-	env, err := bdCommandEnv(cityPath, cfg, target)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
 
 	traceStart := time.Now()
@@ -351,6 +364,25 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	return 0
+}
+
+func bdCommandNeedsDependencyTargetCompatibilityRepair(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "close":
+		return true
+	case "mol":
+		if len(args) < 2 {
+			return false
+		}
+		switch args[1] {
+		case "current", "last-activity", "burn":
+			return true
+		}
+	}
+	return false
 }
 
 func parseBdReleaseIfCurrentArgs(args []string) (id, expectedAssignee string, ok bool, err error) {

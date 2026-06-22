@@ -30,6 +30,17 @@ type rawDBGetter interface {
 //     metadata (e.g. gc.routed_to during sling) on a non-ephemeral bead.
 var idDefaultRepairTables = []string{"dependencies", "events", "wisp_events"}
 
+type dependencyTargetCompatibilityTable struct {
+	name            string
+	targetIndex     string
+	typeTargetIndex string
+}
+
+var dependencyTargetCompatibilityTables = []dependencyTargetCompatibilityTable{
+	{name: "dependencies", targetIndex: "idx_dep_depends_on_id", typeTargetIndex: "idx_dep_type_depends_on_id"},
+	{name: "wisp_dependencies", targetIndex: "idx_wisp_dep_depends_on_id", typeTargetIndex: "idx_wisp_dep_type_depends_on_id"},
+}
+
 // repairIDDefault ensures table.id has DEFAULT (uuid()). It is idempotent and
 // tolerant of an absent table (e.g. wisp_events): it checks INFORMATION_SCHEMA
 // and only issues the ALTER when the id column exists without a default.
@@ -56,6 +67,169 @@ func repairIDDefault(db *sql.DB, table string) error {
 		return fmt.Errorf("repairing %s.id default: %w", table, err)
 	}
 	return nil
+}
+
+// RepairDependencyTargetCompatibility restores the legacy depends_on_id column
+// contract expected by pinned bd/beads builds when the DB has already migrated
+// to split dependency target columns. The repair is idempotent and only touches
+// dependency tables that already contain all split target columns.
+func RepairDependencyTargetCompatibility(db *sql.DB) error {
+	for _, table := range dependencyTargetCompatibilityTables {
+		if err := repairDependencyTargetCompatibility(db, table); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RepairDependencyTargetCompatibilityAt opens the native beads DB for scopeRoot
+// and applies RepairDependencyTargetCompatibility. It is used by gc bd before
+// handing off to the external bd binary, so the pinned CLI sees the schema it
+// expects even when native-store selection would otherwise fall back.
+func RepairDependencyTargetCompatibilityAt(parent context.Context, scopeRoot string, env map[string]string) error {
+	ctx, cancel := nativeDoltOperationContext(parent)
+	defer cancel()
+	restoreEnv, err := withNativeDoltOpenEnv(env)
+	if err != nil {
+		return err
+	}
+	defer restoreEnv()
+	storage, err := nativeDoltOpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = storage.Close() }()
+	accessor, ok := storage.(rawDBGetter)
+	if !ok {
+		return nil
+	}
+	return RepairDependencyTargetCompatibility(accessor.DB())
+}
+
+//nolint:gosec // G201: table/index names come from dependencyTargetCompatibilityTables.
+func repairDependencyTargetCompatibility(db *sql.DB, table dependencyTargetCompatibilityTable) error {
+	columns, err := dependencyTargetColumnState(db, table.name)
+	if err != nil {
+		return err
+	}
+	if len(columns) == 0 || !columns.hasSplitTargets() {
+		return nil
+	}
+	target, hasTarget := columns["depends_on_id"]
+	if hasTarget && target.generated {
+		if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", quoteSQLIdentifier(table.name), quoteSQLIdentifier("depends_on_id"))); err != nil {
+			return fmt.Errorf("replacing generated %s.depends_on_id compatibility column: %w", table.name, err)
+		}
+		hasTarget = false
+	}
+	if !hasTarget {
+		if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s varchar(255)", quoteSQLIdentifier(table.name), quoteSQLIdentifier("depends_on_id"))); err != nil {
+			return fmt.Errorf("adding %s.depends_on_id compatibility column: %w", table.name, err)
+		}
+		hasTarget = true
+	}
+	if !hasTarget {
+		return nil
+	}
+	if _, err := db.Exec(fmt.Sprintf(
+		"UPDATE %s SET depends_on_id = COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) WHERE depends_on_id IS NULL",
+		quoteSQLIdentifier(table.name),
+	)); err != nil {
+		return fmt.Errorf("backfilling %s.depends_on_id compatibility column: %w", table.name, err)
+	}
+	if _, err := db.Exec(fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s (depends_on_id)", quoteSQLIdentifier(table.targetIndex), quoteSQLIdentifier(table.name))); err != nil {
+		return fmt.Errorf("creating %s.%s: %w", table.name, table.targetIndex, err)
+	}
+	if _, err := db.Exec(fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s (type, depends_on_id)", quoteSQLIdentifier(table.typeTargetIndex), quoteSQLIdentifier(table.name))); err != nil {
+		return fmt.Errorf("creating %s.%s: %w", table.name, table.typeTargetIndex, err)
+	}
+	for _, event := range []string{"INSERT", "UPDATE"} {
+		if err := repairDependencyTargetCompatibilityTrigger(db, table.name, event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type dependencyTargetColumn struct {
+	generated bool
+}
+
+type dependencyTargetColumns map[string]dependencyTargetColumn
+
+func (c dependencyTargetColumns) hasSplitTargets() bool {
+	_, hasIssue := c["depends_on_issue_id"]
+	_, hasWisp := c["depends_on_wisp_id"]
+	_, hasExternal := c["depends_on_external"]
+	return hasIssue && hasWisp && hasExternal
+}
+
+func dependencyTargetColumnState(db *sql.DB, table string) (dependencyTargetColumns, error) {
+	rows, err := db.Query(`
+		SELECT COLUMN_NAME, EXTRA
+		FROM INFORMATION_SCHEMA.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE()
+		  AND TABLE_NAME = ?
+	`, table)
+	if err != nil {
+		return nil, fmt.Errorf("checking %s dependency target columns: %w", table, err)
+	}
+	defer rows.Close()
+
+	columns := make(dependencyTargetColumns)
+	for rows.Next() {
+		var name, extra string
+		if err := rows.Scan(&name, &extra); err != nil {
+			return nil, fmt.Errorf("scanning %s dependency target columns: %w", table, err)
+		}
+		columns[name] = dependencyTargetColumn{generated: strings.Contains(strings.ToLower(extra), "generated")}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating %s dependency target columns: %w", table, err)
+	}
+	return columns, nil
+}
+
+func repairDependencyTargetCompatibilityTrigger(db *sql.DB, table, event string) error {
+	suffix := "bi"
+	if event == "UPDATE" {
+		suffix = "bu"
+	}
+	trigger := table + "_compat_" + suffix
+	var exists int
+	if err := db.QueryRow(`
+		SELECT COUNT(*)
+		FROM INFORMATION_SCHEMA.TRIGGERS
+		WHERE TRIGGER_SCHEMA = DATABASE()
+		  AND TRIGGER_NAME = ?
+	`, trigger).Scan(&exists); err != nil {
+		return fmt.Errorf("checking trigger %s: %w", trigger, err)
+	}
+	if exists > 0 {
+		return nil
+	}
+	stmt := fmt.Sprintf(`CREATE TRIGGER %s BEFORE %s ON %s FOR EACH ROW
+BEGIN
+	IF NEW.depends_on_id IS NULL THEN
+		SET NEW.depends_on_id = COALESCE(NEW.depends_on_issue_id, NEW.depends_on_wisp_id, NEW.depends_on_external);
+	ELSEIF NEW.depends_on_issue_id IS NULL AND NEW.depends_on_wisp_id IS NULL AND NEW.depends_on_external IS NULL THEN
+		IF NEW.depends_on_id LIKE 'external:%%' THEN
+			SET NEW.depends_on_external = NEW.depends_on_id;
+		ELSEIF NEW.depends_on_id LIKE 'wisp-%%' OR NEW.depends_on_id LIKE '%%-wisp-%%' THEN
+			SET NEW.depends_on_wisp_id = NEW.depends_on_id;
+		ELSE
+			SET NEW.depends_on_issue_id = NEW.depends_on_id;
+		END IF;
+	END IF;
+END`, quoteSQLIdentifier(trigger), event, quoteSQLIdentifier(table))
+	if _, err := db.Exec(stmt); err != nil {
+		return fmt.Errorf("creating trigger %s: %w", trigger, err)
+	}
+	return nil
+}
+
+func quoteSQLIdentifier(v string) string {
+	return "`" + strings.ReplaceAll(v, "`", "``") + "`"
 }
 
 const nativeDoltStoreActor = "gascity"
@@ -214,6 +388,11 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 				// DepAdd / event-recording write against the affected table.
 				fmt.Fprintf(os.Stderr, "WARNING: gc beads: %v\n", repairErr)
 			}
+		}
+		if repairErr := RepairDependencyTargetCompatibility(accessor.DB()); repairErr != nil {
+			// Log but don't fail: the error will surface on dependency queries
+			// in pinned bd/beads builds if the compatibility column is required.
+			fmt.Fprintf(os.Stderr, "WARNING: gc beads: %v\n", repairErr)
 		}
 	}
 	return newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix), nil

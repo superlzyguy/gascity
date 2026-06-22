@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -714,6 +715,102 @@ esac
 		}
 		if stderr.String() != "" {
 			t.Fatalf("doBd(%v) stderr = %q, want empty", args, stderr.String())
+		}
+	}
+}
+
+func TestDoBdRepairsDependencyTargetCompatibilityForMoleculeLifecycle(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	t.Cleanup(func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	})
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setCwd(t, cityDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeBuiltinImportsFixture(t, cityDir, "core", "bd")
+
+	binDir := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
+	script := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(script, []byte(`#!/bin/sh
+set -eu
+printf '%s\n' "$*" > "${CAPTURE_PATH}"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CAPTURE_PATH", capture)
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	origRepair := repairBdDependencyTargetCompatibility
+	t.Cleanup(func() { repairBdDependencyTargetCompatibility = origRepair })
+	var repaired bool
+	var gotScope string
+	var gotEnv map[string]string
+	repairBdDependencyTargetCompatibility = func(ctx context.Context, scopeRoot string, env map[string]string) error {
+		if ctx == nil {
+			t.Fatal("repair context is nil")
+		}
+		repaired = true
+		gotScope = scopeRoot
+		gotEnv = env
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"mol", "current", "demo-root"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(mol current) = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	if !repaired {
+		t.Fatal("dependency target compatibility repair was not called")
+	}
+	if !samePath(gotScope, cityDir) {
+		t.Fatalf("repair scope = %q, want %q", gotScope, cityDir)
+	}
+	if gotEnv["GC_STORE_SCOPE"] != "city" {
+		t.Fatalf("repair env GC_STORE_SCOPE = %q, want city", gotEnv["GC_STORE_SCOPE"])
+	}
+	if !samePath(gotEnv["BEADS_DIR"], filepath.Join(cityDir, ".beads")) {
+		t.Fatalf("repair env BEADS_DIR = %q, want %q", gotEnv["BEADS_DIR"], filepath.Join(cityDir, ".beads"))
+	}
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(data)) != "mol current demo-root" {
+		t.Fatalf("forwarded args = %q, want %q", strings.TrimSpace(string(data)), "mol current demo-root")
+	}
+}
+
+func TestBdCommandNeedsDependencyTargetCompatibilityRepair(t *testing.T) {
+	tests := []struct {
+		args []string
+		want bool
+	}{
+		{args: []string{"close", "demo-1"}, want: true},
+		{args: []string{"mol", "current", "demo-root"}, want: true},
+		{args: []string{"mol", "last-activity", "demo-root"}, want: true},
+		{args: []string{"mol", "burn", "demo-root"}, want: true},
+		{args: []string{"mol", "progress", "demo-root"}, want: false},
+		{args: []string{"show", "demo-1"}, want: false},
+		{args: []string{"update", "demo-1", "--set-metadata", "k=v"}, want: false},
+		{args: nil, want: false},
+	}
+	for _, tt := range tests {
+		if got := bdCommandNeedsDependencyTargetCompatibilityRepair(tt.args); got != tt.want {
+			t.Fatalf("bdCommandNeedsDependencyTargetCompatibilityRepair(%v) = %v, want %v", tt.args, got, tt.want)
 		}
 	}
 }

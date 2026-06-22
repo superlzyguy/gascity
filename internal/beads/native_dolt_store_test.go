@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	beadslib "github.com/steveyegge/beads"
 )
 
@@ -1361,6 +1362,97 @@ func TestOpenNativeDoltStoreAtProjectsScopedEnvDuringOpen(t *testing.T) {
 	}
 	if got := os.Getenv("BEADS_DOLT_SERVER_PORT"); got != "9999" {
 		t.Fatalf("BEADS_DOLT_SERVER_PORT after open = %q, want ambient restored", got)
+	}
+}
+
+func TestRepairDependencyTargetCompatibilityAddsLegacyColumn(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	mock.ExpectQuery("SELECT COLUMN_NAME, EXTRA FROM INFORMATION_SCHEMA.COLUMNS").
+		WithArgs("dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "EXTRA"}).
+			AddRow("issue_id", "").
+			AddRow("depends_on_issue_id", "").
+			AddRow("depends_on_wisp_id", "").
+			AddRow("depends_on_external", ""))
+	mock.ExpectExec("ALTER TABLE `dependencies` ADD COLUMN `depends_on_id` varchar\\(255\\)").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("UPDATE `dependencies` SET depends_on_id = COALESCE").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("CREATE INDEX IF NOT EXISTS `idx_dep_depends_on_id` ON `dependencies` \\(depends_on_id\\)").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("CREATE INDEX IF NOT EXISTS `idx_dep_type_depends_on_id` ON `dependencies` \\(type, depends_on_id\\)").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM INFORMATION_SCHEMA.TRIGGERS").
+		WithArgs("dependencies_compat_bi").
+		WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(0))
+	mock.ExpectExec("CREATE TRIGGER `dependencies_compat_bi` BEFORE INSERT ON `dependencies`").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM INFORMATION_SCHEMA.TRIGGERS").
+		WithArgs("dependencies_compat_bu").
+		WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(0))
+	mock.ExpectExec("CREATE TRIGGER `dependencies_compat_bu` BEFORE UPDATE ON `dependencies`").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	table := dependencyTargetCompatibilityTable{
+		name:            "dependencies",
+		targetIndex:     "idx_dep_depends_on_id",
+		typeTargetIndex: "idx_dep_type_depends_on_id",
+	}
+	if err := repairDependencyTargetCompatibility(db, table); err != nil {
+		t.Fatalf("repairDependencyTargetCompatibility: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+func TestRepairDependencyTargetCompatibilityReplacesGeneratedLegacyColumn(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	mock.ExpectQuery("SELECT COLUMN_NAME, EXTRA FROM INFORMATION_SCHEMA.COLUMNS").
+		WithArgs("dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "EXTRA"}).
+			AddRow("issue_id", "").
+			AddRow("depends_on_issue_id", "").
+			AddRow("depends_on_wisp_id", "").
+			AddRow("depends_on_external", "").
+			AddRow("depends_on_id", "STORED GENERATED"))
+	mock.ExpectExec("ALTER TABLE `dependencies` DROP COLUMN `depends_on_id`").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("ALTER TABLE `dependencies` ADD COLUMN `depends_on_id` varchar\\(255\\)").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("UPDATE `dependencies` SET depends_on_id = COALESCE").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("CREATE INDEX IF NOT EXISTS `idx_dep_depends_on_id` ON `dependencies` \\(depends_on_id\\)").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("CREATE INDEX IF NOT EXISTS `idx_dep_type_depends_on_id` ON `dependencies` \\(type, depends_on_id\\)").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM INFORMATION_SCHEMA.TRIGGERS").
+		WithArgs("dependencies_compat_bi").
+		WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(1))
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM INFORMATION_SCHEMA.TRIGGERS").
+		WithArgs("dependencies_compat_bu").
+		WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(1))
+
+	table := dependencyTargetCompatibilityTable{
+		name:            "dependencies",
+		targetIndex:     "idx_dep_depends_on_id",
+		typeTargetIndex: "idx_dep_type_depends_on_id",
+	}
+	if err := repairDependencyTargetCompatibility(db, table); err != nil {
+		t.Fatalf("repairDependencyTargetCompatibility: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
 	}
 }
 
