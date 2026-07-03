@@ -263,13 +263,13 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 	}
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault:
-		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
+		if err := h.nudgeDefault(ctx, req.Text); err != nil {
 			return NudgeResult{}, err
 		}
 		result = NudgeResult{Delivered: true}
 		return result, nil
 	case NudgeDeliveryImmediate:
-		if err := h.nudgeNow(req.Text); err != nil {
+		if err := h.nudgeNow(ctx, req.Text); err != nil {
 			return NudgeResult{}, err
 		}
 		result = NudgeResult{Delivered: true}
@@ -384,12 +384,35 @@ func (h *RuntimeHandle) Respond(_ context.Context, req InteractionResponse) erro
 
 const runtimeHandleWaitIdleTimeout = 30 * time.Second
 
-func (h *RuntimeHandle) nudgeNow(message string) error {
+func (h *RuntimeHandle) nudgeDefault(ctx context.Context, message string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	content := runtime.TextContent(message)
-	if immediate, ok := h.provider.(runtime.ImmediateNudgeProvider); ok {
-		return immediate.NudgeNow(h.sessionName, content)
+	if np, ok := h.provider.(runtime.ContextNudgeProvider); ok {
+		return np.NudgeContext(ctx, h.sessionName, content)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	return h.provider.Nudge(h.sessionName, content)
+}
+
+func (h *RuntimeHandle) nudgeNow(ctx context.Context, message string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	content := runtime.TextContent(message)
+	if immediate, ok := h.provider.(runtime.ContextImmediateNudgeProvider); ok {
+		return immediate.NudgeNowContext(ctx, h.sessionName, content)
+	}
+	if immediate, ok := h.provider.(runtime.ImmediateNudgeProvider); ok {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return immediate.NudgeNow(h.sessionName, content)
+	}
+	return h.nudgeDefault(ctx, message)
 }
 
 func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (NudgeResult, error) {
@@ -397,7 +420,7 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 		ctx = context.Background()
 	}
 	if h.transport == "acp" {
-		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
+		if err := h.nudgeDefault(ctx, req.Text); err != nil {
 			return NudgeResult{}, err
 		}
 		return NudgeResult{Delivered: true}, nil
@@ -421,7 +444,7 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 		}
 		return NudgeResult{Delivered: false}, nil
 	}
-	if err := h.nudgeNow(formatRuntimeWaitIdleReminder(req.Source, req.Text)); err != nil {
+	if err := h.nudgeNow(ctx, formatRuntimeWaitIdleReminder(req.Source, req.Text)); err != nil {
 		return NudgeResult{}, err
 	}
 	return NudgeResult{Delivered: true}, nil

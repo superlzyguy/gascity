@@ -42,6 +42,7 @@ const (
 	// session has to rematerialize a worktree and complete startup dialog.
 	defaultNudgePollStartGrace  = 5 * time.Minute
 	defaultNudgeWaitIdleTimeout = 30 * time.Second
+	defaultNudgeDeliveryTimeout = 60 * time.Second
 )
 
 var errNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismatch")
@@ -625,7 +626,9 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	result, err := handle.Nudge(context.Background(), worker.NudgeRequest{
+	ctx, cancel := context.WithTimeout(context.Background(), defaultNudgeDeliveryTimeout)
+	defer cancel()
+	result, err := handle.Nudge(ctx, worker.NudgeRequest{
 		Text:     message,
 		Delivery: delivery,
 		Source:   "session",
@@ -1101,7 +1104,9 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store beads.Store, sp ru
 		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
 		return false, errors.Join(bookkeepErr, err, relErr)
 	}
-	result, err := handle.Nudge(context.Background(), worker.NudgeRequest{
+	ctx, cancel := context.WithTimeout(context.Background(), defaultNudgeDeliveryTimeout)
+	defer cancel()
+	result, err := handle.Nudge(ctx, worker.NudgeRequest{
 		Text:     msg,
 		Delivery: worker.NudgeDeliveryDefault,
 		Source:   "queue",

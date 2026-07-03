@@ -458,6 +458,17 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 // instance does not own the in-memory ACP connection. Returns nil if the
 // agent process exits during the send (best-effort).
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
+	return p.NudgeContext(context.Background(), name, content)
+}
+
+// NudgeContext is like Nudge, but its busy wait honors caller cancellation.
+func (p *Provider) NudgeContext(ctx context.Context, name string, content []runtime.ContentBlock) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	p.mu.Lock()
 	sc, ok := p.conns[name]
 	p.mu.Unlock()
@@ -479,9 +490,15 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	if !sc.alive() {
 		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	// Wait for agent to become idle.
-	if !sc.waitIdle(p.cfg.nudgeBusyTimeout()) {
+	if err := sc.waitIdleContext(ctx, p.cfg.nudgeBusyTimeout()); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return fmt.Errorf("agent %q busy, timed out waiting for idle", name)
 	}
 
@@ -523,6 +540,8 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 			// from "agent died mid-write."
 			fmt.Fprintf(os.Stderr, "acp: nudge to %q skipped (agent exiting): %v\n", name, err)
 			return nil
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-time.After(nudgePostWriteDrainTimeout):
 			return fmt.Errorf("sending prompt to %q: %w", name, err)
 		}

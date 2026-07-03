@@ -26,6 +26,23 @@ type noImmediateProvider struct {
 	runtime.Provider
 }
 
+type contextNudgeProvider struct {
+	runtime.Provider
+	contextCalls int
+	legacyCalls  int
+}
+
+func (p *contextNudgeProvider) Nudge(name string, content []runtime.ContentBlock) error {
+	p.legacyCalls++
+	return fmt.Errorf("legacy nudge called for %s: %s", name, runtime.FlattenText(content))
+}
+
+func (p *contextNudgeProvider) NudgeContext(ctx context.Context, name string, content []runtime.ContentBlock) error {
+	p.contextCalls++
+	<-ctx.Done()
+	return ctx.Err()
+}
+
 type providerWithoutProcessScanner struct {
 	runtime.Provider
 }
@@ -3021,6 +3038,31 @@ func TestSendResumesSuspendedSession(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("calls = %#v, want Nudge hello", sp.Calls)
+	}
+}
+
+func TestSendNudgeUsesContextAwareProvider(t *testing.T) {
+	store := beads.NewMemStore()
+	fake := runtime.NewFake()
+	sp := &contextNudgeProvider{Provider: fake}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	err = mgr.Send(ctx, info.ID, "hello", "claude --resume "+info.SessionKey, runtime.Config{WorkDir: "/tmp"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Send error = %v, want context deadline exceeded", err)
+	}
+	if sp.contextCalls != 1 {
+		t.Fatalf("context nudge calls = %d, want 1", sp.contextCalls)
+	}
+	if sp.legacyCalls != 0 {
+		t.Fatalf("legacy nudge calls = %d, want 0", sp.legacyCalls)
 	}
 }
 

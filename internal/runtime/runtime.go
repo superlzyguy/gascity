@@ -257,6 +257,18 @@ type ImmediateNudgeProvider interface {
 	NudgeNow(name string, content []ContentBlock) error
 }
 
+// ContextNudgeProvider is an optional extension for providers whose default
+// nudge path can honor caller cancellation and deadlines.
+type ContextNudgeProvider interface {
+	NudgeContext(ctx context.Context, name string, content []ContentBlock) error
+}
+
+// ContextImmediateNudgeProvider is an optional extension for providers whose
+// immediate nudge path can honor caller cancellation and deadlines.
+type ContextImmediateNudgeProvider interface {
+	NudgeNowContext(ctx context.Context, name string, content []ContentBlock) error
+}
+
 // InterruptedTurnResetProvider is an optional extension for runtimes that can
 // discard the just-interrupted user turn from the provider's active
 // conversation state without restarting the session.

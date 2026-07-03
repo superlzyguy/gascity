@@ -316,11 +316,18 @@ func (sc *sessionConn) markIdleLocked() {
 // waitIdle blocks until the agent is not busy or the timeout expires.
 // Returns true if the agent became idle, false on timeout.
 func (sc *sessionConn) waitIdle(timeout time.Duration) bool {
+	return sc.waitIdleContext(context.Background(), timeout) == nil
+}
+
+func (sc *sessionConn) waitIdleContext(ctx context.Context, timeout time.Duration) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	sc.mu.Lock()
 	sc.ensureIdleChannelLocked()
 	if sc.activePromptID == 0 {
 		sc.mu.Unlock()
-		return true
+		return nil
 	}
 	idleCh := sc.idleCh
 	sc.mu.Unlock()
@@ -330,9 +337,11 @@ func (sc *sessionConn) waitIdle(timeout time.Duration) bool {
 
 	select {
 	case <-idleCh:
-		return true
+		return nil
 	case <-timer.C:
-		return false
+		return context.DeadlineExceeded
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

@@ -479,6 +479,16 @@ func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout
 // multi-pane resolution, retry with backoff, and SIGWINCH wake.
 // Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
+	return p.NudgeContext(context.Background(), name, content)
+}
+
+// NudgeContext is like Nudge, but its best-effort idle wait honors caller
+// cancellation. If the context is canceled before idle is observed, delivery is
+// skipped so command callers do not block behind a stuck interactive boundary.
+func (p *Provider) NudgeContext(ctx context.Context, name string, content []runtime.ContentBlock) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Wait for the agent to be idle before sending, unless disabled.
 	// This prevents interrupting active tool calls — the prompt is visible
 	// in scrollback during inter-tool-call gaps, so immediate send-keys
@@ -487,15 +497,30 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 		// Best-effort wait — if it fails (session gone, timeout), proceed
 		// with the nudge anyway. The message may arrive during active work,
 		// but Claude's cooperative queue will handle it at the next turn.
-		_ = p.tm.WaitForIdle(context.Background(), name, idleTimeout)
+		_ = p.tm.WaitForIdle(ctx, name, idleTimeout)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 	}
-	return p.NudgeNow(name, content)
+	return p.NudgeNowContext(ctx, name, content)
 }
 
 // NudgeNow sends a message immediately without performing a wait-idle check.
 func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
+	return p.NudgeNowContext(context.Background(), name, content)
+}
+
+// NudgeNowContext sends a message immediately without performing a wait-idle
+// check, honoring caller cancellation during tmux delivery waits.
+func (p *Provider) NudgeNowContext(ctx context.Context, name string, content []runtime.ContentBlock) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var parts []string
 	for _, b := range content {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		switch b.Type {
 		case "file_path":
 			if b.Path != "" {
@@ -518,6 +543,9 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 	if message == "" {
 		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	if used, err := p.tm.sendHiddenAttachedText(name, message); used {
 		if err != nil {
@@ -526,7 +554,7 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 		return nil
 	}
 
-	err := p.tm.NudgeSession(name, message)
+	err := p.tm.NudgeSessionContext(ctx, name, message)
 	if err != nil && (errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer)) {
 		return nil
 	}

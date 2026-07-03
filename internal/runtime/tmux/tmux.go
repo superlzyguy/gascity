@@ -1233,12 +1233,23 @@ func getSessionNudgeSem(session string) chan struct{} {
 // acquireNudgeLock attempts to acquire the per-session nudge lock with a timeout.
 // Returns true if the lock was acquired, false if the timeout expired.
 func acquireNudgeLock(session string, timeout time.Duration) bool {
+	return acquireNudgeLockContext(context.Background(), session, timeout) == nil
+}
+
+func acquireNudgeLockContext(ctx context.Context, session string, timeout time.Duration) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	sem := getSessionNudgeSem(session)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case sem <- struct{}{}:
-		return true
-	case <-time.After(timeout):
-		return false
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("nudge lock timeout for session %q: previous nudge may be hung", session)
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -1579,11 +1590,21 @@ func (t *Tmux) pasteLiteralText(target, text string) error {
 // This function ONLY addresses the startup race where the agent TUI hasn't
 // initialized yet, causing tmux send-keys to fail with "not in a mode".
 func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Duration) error {
+	return t.sendKeysLiteralWithRetryContext(context.Background(), target, text, timeout)
+}
+
+func (t *Tmux) sendKeysLiteralWithRetryContext(ctx context.Context, target, text string, timeout time.Duration) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	deadline := time.Now().Add(timeout)
 	interval := t.cfg.NudgeRetryInterval
 	var lastErr error
 
 	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		err := t.sendLiteralText(target, text)
 		if err == nil {
 			return nil
@@ -1601,7 +1622,9 @@ func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Durati
 		if sleep > remaining {
 			sleep = remaining
 		}
-		time.Sleep(sleep)
+		if err := sleepWithContext(ctx, sleep); err != nil {
+			return err
+		}
 		// Grow interval by 1.5x, capped at 2s to stay responsive.
 		// 500ms → 750ms → 1125ms → 1687ms → 2s (capped)
 		interval = interval * 3 / 2
@@ -1626,10 +1649,17 @@ func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Durati
 // queue up and execute one at a time. This prevents garbled input when
 // SessionStart hooks and nudges arrive simultaneously.
 func (t *Tmux) NudgeSession(session, message string) error {
+	return t.NudgeSessionContext(context.Background(), session, message)
+}
+
+func (t *Tmux) NudgeSessionContext(ctx context.Context, session, message string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Serialize nudges to this session to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
-	if !acquireNudgeLock(session, t.cfg.NudgeLockTimeout) {
-		return fmt.Errorf("nudge lock timeout for session %q: previous nudge may be hung", session)
+	if err := acquireNudgeLockContext(ctx, session, t.cfg.NudgeLockTimeout); err != nil {
+		return err
 	}
 	defer releaseNudgeLock(session)
 
@@ -1649,13 +1679,15 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	t.WakePaneIfDetached(session)
 
 	// 1. Send text in literal mode with retry on transient errors
-	if err := t.sendKeysLiteralWithRetry(target, message, t.cfg.NudgeReadyTimeout); err != nil {
+	if err := t.sendKeysLiteralWithRetryContext(ctx, target, message, t.cfg.NudgeReadyTimeout); err != nil {
 		return err
 	}
 
 	// 2. Wait for paste to complete (tested, required). Kimi's TUI can take
 	// longer to accept large pasted prompts in detached panes.
-	time.Sleep(t.nudgeSubmitDebounce(target))
+	if err := sleepWithContext(ctx, t.nudgeSubmitDebounce(target)); err != nil {
+		return err
+	}
 
 	// 3. Send Escape only for TUIs where it's an insert-mode escape, not a
 	// semantic input key. Claude, Codex, Gemini, and OpenCode all treat
@@ -1664,7 +1696,9 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	if t.shouldSendEscapeBeforeEnter(target) {
 		// See: https://github.com/anthropics/gastown/issues/307
 		_, _ = t.run("send-keys", "-t", target, "Escape")
-		time.Sleep(100 * time.Millisecond)
+		if err := sleepWithContext(ctx, 100*time.Millisecond); err != nil {
+			return err
+		}
 	}
 
 	// 4. Wake detached panes before Enter. Some TUIs accept pasted input while
@@ -1675,7 +1709,12 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
-			time.Sleep(200 * time.Millisecond)
+			if err := sleepWithContext(ctx, 200*time.Millisecond); err != nil {
+				return err
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		if _, err := t.run("send-keys", "-t", target, "Enter"); err != nil {
 			lastErr = err

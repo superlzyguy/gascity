@@ -584,7 +584,7 @@ func formatWaitIdleReminder(source, message string) string {
 
 func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, immediate bool) error {
 	content := runtime.TextContent(message)
-	err := m.nudgeContent(sessName, content, immediate)
+	err := m.nudgeContent(ctx, sessName, content, immediate)
 	recordCtx := ctx
 	if recordCtx == nil || recordCtx.Err() != nil {
 		recordCtx = context.Background()
@@ -596,11 +596,26 @@ func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, im
 	return nil
 }
 
-func (m *Manager) nudgeContent(sessName string, content []runtime.ContentBlock, immediate bool) error {
+func (m *Manager) nudgeContent(ctx context.Context, sessName string, content []runtime.ContentBlock, immediate bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if immediate {
+		if np, ok := m.sp.(runtime.ContextImmediateNudgeProvider); ok {
+			return np.NudgeNowContext(ctx, sessName, content)
+		}
 		if np, ok := m.sp.(runtime.ImmediateNudgeProvider); ok {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			return np.NudgeNow(sessName, content)
 		}
+	}
+	if np, ok := m.sp.(runtime.ContextNudgeProvider); ok {
+		return np.NudgeContext(ctx, sessName, content)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	return m.sp.Nudge(sessName, content)
 }
