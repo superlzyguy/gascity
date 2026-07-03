@@ -87,7 +87,10 @@ type defaultScaleCheckTarget struct {
 	err      error
 }
 
-var errPoolSessionCreateBudgetExhausted = errors.New("pool session create budget exhausted")
+var (
+	errPoolSessionCreateBudgetExhausted       = errors.New("pool session create budget exhausted")
+	errPoolSessionOwnedByConfiguredNamedAlias = errors.New("singleton pool alias owned by configured named session")
+)
 
 // poolSessionCreateFairShareCounter rotates scarce create tokens across
 // contending pools so stable template sort order does not always win.
@@ -1859,6 +1862,9 @@ func discoverSessionBeadsWithRoots(
 			continue
 		}
 		roots[template] = true
+		if !sessionAlreadyDesired && poolManagedSingletonDuplicateOfConfiguredNamedAlias(bp, cfgAgent, b) {
+			continue
+		}
 		if !sessionAlreadyDesired && !isManualSessionBeadForAgent(b, cfgAgent) && !isNamedSessionBead(b) &&
 			desiredHasCanonicalNonExpandingPoolSession(desired, template, cfgAgent) && staleNonExpandingPoolSessionBead(cfgAgent, b) {
 			continue
@@ -2116,6 +2122,53 @@ func desiredHasCanonicalNonExpandingPoolSession(desired map[string]TemplateParam
 		}
 	}
 	return false
+}
+
+func canonicalNamedSessionOwnsSingletonPoolAlias(candidates []beads.Bead, cfg *config.City, cityName string, cfgAgent *config.Agent) bool {
+	if cfg == nil || cfgAgent == nil || !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return false
+	}
+	canonical := cfgAgent.QualifiedName()
+	spec, ok := findNamedSessionSpec(cfg, cityName, canonical)
+	if !ok || namedSessionBackingTemplate(spec) != canonical {
+		return false
+	}
+	bead, ok := session.FindCanonicalNamedSessionBead(candidates, spec)
+	if !ok || isDrainedSessionBead(bead) || isFailedCreateSessionBead(bead) {
+		return false
+	}
+	return strings.TrimSpace(bead.Metadata["alias"]) == canonical
+}
+
+func poolManagedSingletonDuplicateOfConfiguredNamedAlias(bp *agentBuildParams, cfgAgent *config.Agent, bead beads.Bead) bool {
+	if bp == nil || bp.sessionBeads == nil {
+		return false
+	}
+	return poolManagedSingletonDuplicateOfConfiguredNamedAliasInSnapshot(bp.sessionBeads.Open(), bp.city, bp.cityName, cfgAgent, bead)
+}
+
+func poolManagedSingletonDuplicateOfConfiguredNamedAliasInSnapshot(candidates []beads.Bead, cfg *config.City, cityName string, cfgAgent *config.Agent, bead beads.Bead) bool {
+	if cfgAgent == nil || !canonicalNamedSessionOwnsSingletonPoolAlias(candidates, cfg, cityName, cfgAgent) {
+		return false
+	}
+	if isNamedSessionBead(bead) || isManualSessionBeadForAgent(bead, cfgAgent) {
+		return false
+	}
+	if !isPoolManagedSessionBead(bead) || !isEphemeralSessionBeadForAgent(bead, cfgAgent) {
+		return false
+	}
+	if resolvedSessionTemplate(bead, cfg) != cfgAgent.QualifiedName() {
+		return false
+	}
+	if strings.TrimSpace(bead.Metadata["alias"]) != "" {
+		return false
+	}
+	canonical := cfgAgent.QualifiedName()
+	conflictAlias := strings.TrimSpace(bead.Metadata[poolAliasConflictMetadataKey])
+	if conflictAlias != "" && conflictAlias != canonical {
+		return false
+	}
+	return beadIdentifiesAsCanonical(bead, canonical) || conflictAlias == canonical
 }
 
 // poolRealizeParallelism caps the number of concurrent pool session bead
@@ -2917,6 +2970,10 @@ func selectOrPlanPoolSessionBead(
 		if isManualSessionBeadForAgent(*preferred, cfgAgent) {
 			return *preferred, slot, nil, nil
 		}
+		if poolManagedSingletonDuplicateOfConfiguredNamedAlias(bp, cfgAgent, *preferred) &&
+			!sessionBeadHasAssignedWork(bp.assignedWorkBeads, *preferred) {
+			return beads.Bead{}, 0, nil, errPoolSessionOwnedByConfiguredNamedAlias
+		}
 		bead, err := normalizeNonExpandingPoolSessionBeadForSelection(bp, cfgAgent, *preferred)
 		return bead, slot, nil, err
 	}
@@ -2937,6 +2994,10 @@ func selectOrPlanPoolSessionBead(
 			bead, err := normalizeNonExpandingPoolSessionBeadForSelection(bp, cfgAgent, bead)
 			return bead, slot, nil, err
 		}
+	}
+	if bp != nil && bp.sessionBeads != nil &&
+		canonicalNamedSessionOwnsSingletonPoolAlias(bp.sessionBeads.Open(), bp.city, bp.cityName, cfgAgent) {
+		return beads.Bead{}, 0, nil, errPoolSessionOwnedByConfiguredNamedAlias
 	}
 	slot := claimDesiredPoolSlot(bp.city, cfgAgent, beads.Bead{}, usedSlots)
 	_, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(cfgAgent, slot)
@@ -3002,6 +3063,9 @@ func reusablePoolSessionBead(bp *agentBuildParams, cfgAgent *config.Agent, templ
 		return false
 	}
 	if sessionBeadHasAssignedWork(bp.assignedWorkBeads, bead) {
+		return false
+	}
+	if poolManagedSingletonDuplicateOfConfiguredNamedAlias(bp, cfgAgent, bead) {
 		return false
 	}
 	if used != nil && used[bead.ID] {

@@ -295,6 +295,9 @@ func poolInFlightNewRequests(cfg *config.City, sessionBeads []beads.Bead, resume
 			if !poolSessionConsumesNewDemand(sb) {
 				continue
 			}
+			if poolManagedSingletonDuplicateOfConfiguredNamedAliasInSnapshot(sortedSessionBeads, cfg, cfg.EffectiveCityName(), agent, sb) {
+				continue
+			}
 			requests[template] = append(requests[template], SessionRequest{
 				Template:      template,
 				Tier:          "new",

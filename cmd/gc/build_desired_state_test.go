@@ -6026,6 +6026,85 @@ func TestBuildDesiredState_AlwaysNamedSession_MaterializesWithoutWorkBeads(t *te
 	}
 }
 
+func TestBuildDesiredState_AlwaysNamedSingletonSkipsAliasDeferredPoolDuplicate(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			BindingName:       "gastown",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template:    "mayor",
+			BindingName: "gastown",
+			Mode:        "always",
+		}},
+	}
+	identity := "gastown.mayor"
+	sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity)
+	if _, err := store.Create(beads.Bead{
+		Title:  identity,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + identity, "template:" + identity},
+		Metadata: map[string]string{
+			"template":                   identity,
+			"agent_name":                 identity,
+			"alias":                      identity,
+			"session_name":               sessionName,
+			"state":                      "awake",
+			"session_origin":             "named",
+			namedSessionMetadataKey:      boolMetadata(true),
+			namedSessionIdentityMetadata: identity,
+			namedSessionModeMetadata:     "always",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	duplicate, err := store.Create(beads.Bead{
+		Title:  identity,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + identity, "template:" + identity},
+		Metadata: map[string]string{
+			"template":                        identity,
+			"agent_name":                      identity,
+			"alias":                           "",
+			"session_name":                    "s-mayor-duplicate",
+			"state":                           "awake",
+			"session_origin":                  "ephemeral",
+			poolManagedMetadataKey:            boolMetadata(true),
+			poolAliasConflictMetadataKey:      identity,
+			poolAliasConflictCountMetadataKey: "15",
+			poolAliasConflictAtMetadataKey:    "2026-07-03T12:40:00Z",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	dsResult := buildDesiredState(cfg.EffectiveCityName(), cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	if _, ok := dsResult.State[sessionName]; !ok {
+		t.Fatalf("desired state missing canonical named session %q; keys=%v stderr=%q", sessionName, mapKeys(dsResult.State), stderr.String())
+	}
+	if _, ok := dsResult.State[duplicate.Metadata["session_name"]]; ok {
+		t.Fatalf("desired state includes alias-deferred pool duplicate %q; keys=%v", duplicate.Metadata["session_name"], mapKeys(dsResult.State))
+	}
+	storedDuplicate, err := store.Get(duplicate.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", duplicate.ID, err)
+	}
+	if got := storedDuplicate.Metadata[poolAliasConflictCountMetadataKey]; got != "15" {
+		t.Fatalf("pool_alias_conflict_count = %q, want unchanged 15", got)
+	}
+	if strings.Contains(stderr.String(), "deferring singleton pool identity normalization") {
+		t.Fatalf("stderr = %q, did not expect deferred alias retry for named-owned singleton", stderr.String())
+	}
+}
+
 func TestBuildDesiredState_SuspendedNamedSession_DoesNotMaterialize(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
