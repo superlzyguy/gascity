@@ -377,6 +377,119 @@ func TestInstallCodexUpgradesSessionStartMissingManagedMarker(t *testing.T) {
 	}
 }
 
+func TestInstallCodexUpgradesCityQualifiedSessionStart(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/work/.codex/hooks.json"] = []byte(`{
+  "hooks": {
+    "PreCompact": [{
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc handoff --auto --hook-format codex \"context cycle\""
+      }]
+    }],
+    "SessionStart": [{
+      "matcher": "startup",
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/gc' prime --hook --hook-format codex"
+      }]
+    }]
+  }
+}`)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got := string(fs.Files["/work/.codex/hooks.json"])
+	if strings.Contains(got, "gc --city") {
+		t.Fatalf("city-qualified managed SessionStart was not canonicalized:\n%s", got)
+	}
+	sessionStartCommand := codexHookCommand(t, fs.Files["/work/.codex/hooks.json"], "SessionStart")
+	if !strings.Contains(sessionStartCommand, sessionStartCurrentFormBody) {
+		t.Fatalf("SessionStart command = %q, want current managed form", sessionStartCommand)
+	}
+}
+
+func TestInstallCodexDoesNotClobberUserWrappedCommand(t *testing.T) {
+	fs := fsys.NewFake()
+	userOwned := []byte(`{
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "",
+      "hooks": [{
+        "type": "command",
+        "command": "my-wrapper gc prime --hook --foo"
+      }]
+    }]
+  }
+}`)
+	fs.Files["/work/.codex/hooks.json"] = append([]byte(nil), userOwned...)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	if got := fs.Files["/work/.codex/hooks.json"]; !bytes.Equal(got, userOwned) {
+		t.Fatalf("user-wrapped Codex command was rewritten:\nbefore:\n%s\nafter:\n%s", userOwned, got)
+	}
+}
+
+func TestInstallCodexDedupesManagedSessionStartDrift(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/work/.codex/hooks.json"] = []byte(`{
+  "hooks": {
+    "PreCompact": [{
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc handoff --auto --hook-format codex \"context cycle\""
+      }]
+    }],
+    "SessionStart": [{
+      "matcher": "startup",
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"
+      }]
+    }, {
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"
+      }]
+    }, {
+      "matcher": "",
+      "hooks": [{
+        "type": "command",
+        "command": "printf custom"
+      }]
+    }]
+  }
+}`)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	entries := claudeHookEntries(t, fs.Files["/work/.codex/hooks.json"], "SessionStart")
+	if len(entries) != 2 {
+		t.Fatalf("SessionStart entries = %d, want managed plus custom:\n%s", len(entries), string(fs.Files["/work/.codex/hooks.json"]))
+	}
+	managedCount := 0
+	for _, entry := range entries {
+		for _, hook := range entry.Hooks {
+			if strings.Contains(hook.Command, sessionStartCurrentFormBody) {
+				managedCount++
+				if entry.Matcher != "startup" {
+					t.Fatalf("managed SessionStart matcher = %q, want startup", entry.Matcher)
+				}
+			}
+		}
+	}
+	if managedCount != 1 {
+		t.Fatalf("managed SessionStart entries = %d, want 1:\n%s", managedCount, string(fs.Files["/work/.codex/hooks.json"]))
+	}
+}
+
 func TestInstallCodexUpgradesManagedFileMissingPreCompact(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/work/.codex/hooks.json"] = []byte(`{
@@ -453,6 +566,21 @@ func TestCodexHooksMissingManagedPreCompact(t *testing.T) {
 	currentManaged := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"gc prime --hook --hook-format codex"}]}],"PreCompact":[{"hooks":[{"type":"command","command":"gc handoff --auto --hook-format codex"}]}]}}`)
 	if CodexHooksMissingManagedPreCompact(currentManaged) {
 		t.Fatal("managed Codex hooks with PreCompact were reported stale")
+	}
+
+	cityQualifiedManaged := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/gc' prime --hook --hook-format codex"}]}],"PreCompact":[{"hooks":[{"type":"command","command":"gc handoff --auto --hook-format codex"}]}]}}`)
+	if !CodexHooksNeedManagedUpgrade(cityQualifiedManaged) {
+		t.Fatal("city-qualified managed Codex hook was not reported as needing upgrade")
+	}
+
+	duplicateManaged := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"}]},{"hooks":[{"type":"command","command":"GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"}]}],"PreCompact":[{"hooks":[{"type":"command","command":"gc handoff --auto --hook-format codex"}]}]}}`)
+	if !CodexHooksNeedManagedUpgrade(duplicateManaged) {
+		t.Fatal("duplicate managed Codex hook was not reported as needing upgrade")
+	}
+
+	preCompactMissingHookFormat := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"}]}],"PreCompact":[{"hooks":[{"type":"command","command":"gc handoff --auto \"context cycle\""}]}]}}`)
+	if !CodexHooksNeedManagedUpgrade(preCompactMissingHookFormat) {
+		t.Fatal("managed Codex PreCompact missing hook format was not reported as needing upgrade")
 	}
 
 	customOnly := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"printf custom"}]}]}}`)

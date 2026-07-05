@@ -647,6 +647,9 @@ func upgradeCodexHooks(existing, desired []byte) ([]byte, bool, error) {
 	hasManagedCommand := codexHookValueHasManagedCommand(root)
 	needsPreCompact := codexHookDocCanAddPreCompact(root)
 	changed := upgradeCodexHookValue(root)
+	if desiredCodexPreCompactHook(desired) != nil && normalizeCodexManagedHookEntries(root) {
+		changed = true
+	}
 	if addCodexPreCompactHook(root, desired) {
 		changed = true
 	}
@@ -660,6 +663,19 @@ func upgradeCodexHooks(existing, desired []byte) ([]byte, bool, error) {
 	return data, changed, nil
 }
 
+// CodexHooksNeedManagedUpgrade reports whether data is a Gas City managed
+// Codex hooks document with stale managed command semantics. Formatting-only
+// canonicalization is intentionally ignored so doctor reports actionable drift.
+func CodexHooksNeedManagedUpgrade(data []byte) bool {
+	var root any
+	if err := json.Unmarshal(data, &root); err != nil {
+		return false
+	}
+	return upgradeCodexHookValue(root) ||
+		addCodexPreCompactHook(root, nil) ||
+		normalizeCodexManagedHookEntries(root)
+}
+
 func normalizeCodexHookCommands(existing []byte) ([]byte, bool, error) {
 	var root any
 	if err := json.Unmarshal(existing, &root); err != nil {
@@ -667,6 +683,9 @@ func normalizeCodexHookCommands(existing []byte) ([]byte, bool, error) {
 	}
 	hasManagedCommand := codexHookValueHasManagedCommand(root)
 	changed := upgradeCodexHookValue(root)
+	if normalizeCodexManagedHookEntries(root) {
+		changed = true
+	}
 	data, err := overlay.MarshalCanonicalJSON(root)
 	if err != nil {
 		return nil, false, err
@@ -743,48 +762,157 @@ func upgradeCodexHookValue(v any) bool {
 	}
 }
 
-var codexManagedHookCommandNeedles = []string{
-	`gc prime --hook`,
-	`gc nudge drain --inject`,
-	`gc mail check --inject`,
-	`gc hook --inject`,
-	`gc handoff --auto`,
+func normalizeCodexManagedHookEntries(root any) bool {
+	doc, ok := root.(map[string]any)
+	if !ok {
+		return false
+	}
+	hooksMap, ok := doc["hooks"].(map[string]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for event, entriesValue := range hooksMap {
+		entries, ok := entriesValue.([]any)
+		if !ok {
+			continue
+		}
+		normalized := entries[:0]
+		seenManaged := map[string]bool{}
+		for _, entry := range entries {
+			if event == "SessionStart" {
+				if normalizeCodexManagedSessionStartEntry(entry) {
+					changed = true
+				}
+			}
+			if codexHookValueHasManagedCommand(entry) {
+				keyData, err := overlay.MarshalCanonicalJSON(entry)
+				if err == nil {
+					key := string(keyData)
+					if seenManaged[key] {
+						changed = true
+						continue
+					}
+					seenManaged[key] = true
+				}
+			}
+			normalized = append(normalized, entry)
+		}
+		if len(normalized) != len(entries) {
+			hooksMap[event] = normalized
+		}
+	}
+	return changed
 }
 
-func isCodexManagedHookCommand(command string) bool {
-	for _, needle := range codexManagedHookCommandNeedles {
-		if strings.Contains(command, needle) {
+func normalizeCodexManagedSessionStartEntry(entry any) bool {
+	entryMap, ok := entry.(map[string]any)
+	if !ok || !codexHookEntryHasCommandBody(entryMap, sessionStartCurrentFormBody) {
+		return false
+	}
+	if matcher, ok := entryMap["matcher"].(string); !ok || matcher != "startup" {
+		entryMap["matcher"] = "startup"
+		return true
+	}
+	return false
+}
+
+func codexHookEntryHasCommandBody(entry map[string]any, body string) bool {
+	hooksValue, ok := entry["hooks"].([]any)
+	if !ok {
+		return false
+	}
+	for _, hookValue := range hooksValue {
+		hookMap, ok := hookValue.(map[string]any)
+		if !ok {
+			continue
+		}
+		command, ok := hookMap["command"].(string)
+		if !ok {
+			continue
+		}
+		if commandBodyAfterCanonicalPrefix(command) == body {
 			return true
 		}
 	}
 	return false
 }
 
-func upgradeCodexHookCommand(command string) (string, bool) {
+func isCodexManagedHookCommand(command string) bool {
 	body := commandBodyAfterCanonicalPrefix(command)
-	if equalsLegacyCommandBody(body, `gc prime --hook`) ||
+	return isCodexManagedSessionStartBody(body) ||
+		isCodexManagedPromptBody(body) ||
+		isCodexManagedPreCompactBody(body) ||
+		equalsLegacyCommandBody(body, `gc hook --inject`) ||
+		equalsLegacyCommandBody(body, `gc hook --inject --hook-format codex`)
+}
+
+var codexCityQualifiedSessionStartPattern = regexp.MustCompile(`^(?:GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart |GC_HOOK_EVENT_NAME=SessionStart )?gc --city (?:'[^']+'|"[^"]+"|[^[:space:]]+) prime --hook(?: --hook-format codex)?$`)
+
+func isCodexManagedSessionStartBody(body string) bool {
+	return equalsLegacyCommandBody(body, `gc prime --hook`) ||
 		equalsLegacyCommandBody(body, `gc prime --hook --hook-format codex`) ||
 		equalsLegacyCommandBody(body, `GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`) ||
 		equalsLegacyCommandBody(body, `GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex`) ||
-		equalsLegacyCommandBody(body, sessionStartPreviousManagedFormBody) {
+		equalsLegacyCommandBody(body, sessionStartPreviousManagedFormBody) ||
+		equalsLegacyCommandBody(body, sessionStartCurrentFormBody) ||
+		codexCityQualifiedSessionStartPattern.MatchString(body)
+}
+
+func codexSessionStartBodyNeedsUpgrade(body string) bool {
+	return isCodexManagedSessionStartBody(body) && !equalsLegacyCommandBody(body, sessionStartCurrentFormBody)
+}
+
+func isCodexManagedPromptBody(body string) bool {
+	return equalsLegacyCommandBody(body, `gc nudge drain --inject`) ||
+		equalsLegacyCommandBody(body, `gc nudge drain --inject --hook-format codex`) ||
+		equalsLegacyCommandBody(body, `gc mail check --inject`) ||
+		equalsLegacyCommandBody(body, `gc mail check --inject --hook-format codex`) ||
+		strings.HasPrefix(body, managedPromptHookRunPrefix)
+}
+
+func isCodexManagedPreCompactBody(body string) bool {
+	return equalsLegacyCommandBody(body, `gc handoff --auto`) ||
+		equalsLegacyCommandBody(body, `gc handoff --auto --hook-format codex`) ||
+		equalsLegacyCommandBody(body, `gc handoff "context cycle"`) ||
+		equalsLegacyCommandBody(body, `gc handoff --auto "context cycle"`) ||
+		equalsLegacyCommandBody(body, `gc handoff --auto --hook-format codex "context cycle"`)
+}
+
+func upgradeCodexHookCommand(command string) (string, bool) {
+	body := commandBodyAfterCanonicalPrefix(command)
+	if codexSessionStartBodyNeedsUpgrade(body) {
 		prefix := strings.TrimSuffix(command, body)
 		return prefix + sessionStartCurrentFormBody, true
+	}
+	if upgraded, ok := upgradeCodexPreCompactHookCommand(command); ok {
+		return upgraded, true
 	}
 	if upgraded, ok := upgradeManagedPromptHookCommand(command, "codex"); ok {
 		return upgraded, true
 	}
-	if strings.Contains(command, `--hook-format codex`) {
-		return "", false
-	}
-	for _, needle := range codexManagedHookCommandNeedles {
-		if strings.Contains(command, needle) {
-			return strings.Replace(command, needle, needle+` --hook-format codex`, 1), true
-		}
+	if equalsLegacyCommandBody(body, `gc hook --inject`) {
+		prefix := strings.TrimSuffix(command, body)
+		return prefix + `gc hook --inject --hook-format codex`, true
 	}
 	return "", false
 }
 
 const managedPromptHookRunPrefix = `gc hook run --timeout 15s --timeout-exit-code 0 -- `
+
+func upgradeCodexPreCompactHookCommand(command string) (string, bool) {
+	body := commandBodyAfterCanonicalPrefix(command)
+	prefix := strings.TrimSuffix(command, body)
+	switch {
+	case equalsLegacyCommandBody(body, `gc handoff "context cycle"`),
+		equalsLegacyCommandBody(body, `gc handoff --auto "context cycle"`):
+		return prefix + `gc handoff --auto --hook-format codex "context cycle"`, true
+	case equalsLegacyCommandBody(body, `gc handoff --auto`):
+		return prefix + `gc handoff --auto --hook-format codex`, true
+	default:
+		return "", false
+	}
+}
 
 func upgradeManagedPromptHookCommand(command, hookFormat string) (string, bool) {
 	body := commandBodyAfterCanonicalPrefix(command)

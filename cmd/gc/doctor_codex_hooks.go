@@ -183,7 +183,7 @@ func (c *codexHooksDriftCheck) CanFix() bool { return true }
 
 func (c *codexHooksDriftCheck) Fix(_ *doctor.CheckContext) error {
 	for _, dir := range c.dirs {
-		if !codexHooksMissingPreCompact(filepath.Join(dir, ".codex", "hooks.json")) {
+		if !codexHooksNeedManagedUpgrade(filepath.Join(dir, ".codex", "hooks.json")) {
 			continue
 		}
 		if err := hooks.Install(fsys.OSFS{}, dir, dir, []string{"codex"}); err != nil {
@@ -197,7 +197,7 @@ func (c *codexHooksDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	var stale []string
 	for _, dir := range c.dirs {
 		path := filepath.Join(dir, ".codex", "hooks.json")
-		if codexHooksMissingPreCompact(path) {
+		if codexHooksNeedManagedUpgrade(path) {
 			stale = append(stale, path)
 		}
 	}
@@ -205,9 +205,17 @@ func (c *codexHooksDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 		return okCheck(c.Name(), "Codex hooks are current or user-owned")
 	}
 	return warnCheck(c.Name(),
-		fmt.Sprintf("%d managed Codex hook file(s) missing PreCompact handoff", len(stale)),
+		fmt.Sprintf("%d managed Codex hook file(s) need upgrade (missing PreCompact or stale managed commands)", len(stale)),
 		"run `gc doctor --fix` or restart the city to upgrade managed Codex hooks",
 		stale)
+}
+
+func codexHooksNeedManagedUpgrade(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return hooks.CodexHooksNeedManagedUpgrade(data)
 }
 
 func codexHooksMissingPreCompact(path string) bool {

@@ -39,9 +39,10 @@ func TestCodexHooksDriftCheckPassesCurrentHooks(t *testing.T) {
 	writeCodexHooksForDoctorTest(t, dir, `{
   "hooks": {
     "SessionStart": [{
+      "matcher": "startup",
       "hooks": [{
         "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc prime --hook --hook-format codex"
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"
       }]
     }],
     "PreCompact": [{
@@ -58,6 +59,47 @@ func TestCodexHooksDriftCheckPassesCurrentHooks(t *testing.T) {
 
 	if result.Status != doctor.StatusOK {
 		t.Fatalf("status = %v, want ok; message=%s", result.Status, result.Message)
+	}
+}
+
+func TestCodexHooksDriftCheckFixesCityQualifiedManagedSessionStart(t *testing.T) {
+	dir := t.TempDir()
+	writeCodexHooksForDoctorTest(t, dir, `{
+  "hooks": {
+    "PreCompact": [{
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc handoff --auto --hook-format codex \"context cycle\""
+      }]
+    }],
+    "SessionStart": [{
+      "matcher": "startup",
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/gc' prime --hook --hook-format codex"
+      }]
+    }]
+  }
+}`)
+
+	check := newCodexHooksDriftCheck([]string{dir})
+	result := check.Run(&doctor.CheckContext{})
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning for city-qualified managed hook; message=%s", result.Status, result.Message)
+	}
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	result = check.Run(&doctor.CheckContext{})
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status after fix = %v, want ok; message=%s", result.Status, result.Message)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".codex", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read hooks: %v", err)
+	}
+	if strings.Contains(string(data), "gc --city") {
+		t.Fatalf("fixed hooks still contain city-qualified managed command:\n%s", string(data))
 	}
 }
 
