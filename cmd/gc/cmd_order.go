@@ -1014,6 +1014,21 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 		return 1
 	}
 
+	var firedEvents []events.Event
+	if ep != nil {
+		var err error
+		firedEvents, err = ep.List(events.Filter{Type: events.OrderFired})
+		if err != nil {
+			// best-effort
+		}
+	}
+	latestFired := make(map[string]time.Time)
+	for _, event := range firedEvents {
+		if event.Ts.After(latestFired[event.Subject]) {
+			latestFired[event.Subject] = event.Ts
+		}
+	}
+
 	if jsonOutput {
 		result := orderCheckJSON{
 			SchemaVersion: "1",
@@ -1034,6 +1049,15 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			baseLastRunFn := orders.LastRunAcrossStores(stores...)
 			var lastRunErr error
 			lastRunFn := func(orderName string) (time.Time, error) {
+				if t, ok := latestFired[orderName]; ok && !t.IsZero() {
+					if a.Trigger == "cooldown" {
+						if interval, err := time.ParseDuration(a.Interval); err == nil && interval > 0 {
+							if now.Sub(t) < interval {
+								return t, nil
+							}
+						}
+					}
+				}
 				last, err := baseLastRunFn(orderName)
 				if err != nil {
 					lastRunErr = err
@@ -1103,6 +1127,15 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 		baseLastRunFn := orders.LastRunAcrossStores(stores...)
 		var lastRunErr error
 		lastRunFn := func(orderName string) (time.Time, error) {
+			if t, ok := latestFired[orderName]; ok && !t.IsZero() {
+				if a.Trigger == "cooldown" {
+					if interval, err := time.ParseDuration(a.Interval); err == nil && interval > 0 {
+						if now.Sub(t) < interval {
+							return t, nil
+						}
+					}
+				}
+			}
 			last, err := baseLastRunFn(orderName)
 			if err != nil {
 				lastRunErr = err
