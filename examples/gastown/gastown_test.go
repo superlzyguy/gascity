@@ -3036,6 +3036,64 @@ func TestRefineryPatrolRestartGuidanceAssignsSuccessor(t *testing.T) {
 	assertCurrentWispBurnsRequireSuccessor(t, "refinery formula", formulaBody)
 }
 
+// TestRefineryStartupReconcilesOpenWispsLikeWitness is the regression guard for
+// the mol-refinery-patrol open-wisp leak (su-8w67m). The refinery's patrol
+// wisps are ephemeral molecules on the ledger. A patrol cycle's next-iteration
+// pours and assigns a successor wisp that stays OPEN until a fresh session
+// promotes it to in_progress. The refinery startup only reconciled in_progress
+// wisps, so it never saw that open successor: on every restart it poured yet
+// another wisp and assigned it, leaking +1 open wisp per restart (the reported
+// symptom was four OPEN mol-refinery-patrol wisps alongside one fresh
+// in_progress wisp).
+//
+// mol-witness-patrol already reconciles BOTH open and in_progress patrol wisps
+// on startup — it collects them, keeps exactly one (preferring in_progress),
+// and burns the surplus with `gc bd mol burn` — and therefore does not leak
+// (see TestWitnessStartupAndNoIdleReconcileWisps). The refinery startup must
+// reach that same parity. Wisp roots are molecules, so the reconcile query
+// filters --type=molecule, never the invalid --type=wisp (not a valid bd type;
+// the query errors and matches nothing, which is the ga-7c6 failure mode).
+//
+// The fix itself lands in gastownhall/gascity-packs (the refinery
+// prompt.template.md Startup step). This guard skips until go.mod is bumped to
+// a gascity-packs release that includes it, mirroring
+// TestTmuxKeybindingsAlternateScreenPassthrough.
+func TestRefineryStartupReconcilesOpenWispsLikeWitness(t *testing.T) {
+	data, err := os.ReadFile(gastownRel("packs/gastown/agents/refinery/prompt.template.md"))
+	if err != nil {
+		t.Fatalf("reading refinery prompt: %v", err)
+	}
+	startup := sectionBetween(t, string(data), "## Startup", "## Sequential Rebase Protocol")
+
+	if !strings.Contains(startup, `--status=open --type=molecule`) {
+		t.Skip("embedded gascity-packs mol-refinery-patrol does not yet reconcile " +
+			"open patrol wisps on startup (su-8w67m: +1 open wisp leaked per refinery " +
+			"restart); guard activates once go.mod is bumped to a gascity-packs release " +
+			"that brings the refinery startup to mol-witness-patrol parity")
+	}
+
+	// Parity with the witness Startup Protocol: collect open + in_progress
+	// patrol wisps (molecules — never the invalid --type=wisp), keep one, and
+	// burn the surplus so restarts never accumulate wisps.
+	for _, want := range []string{
+		`gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule`,
+		`gc bd list --assignee="$GC_AGENT" --status=open --type=molecule`,
+		"gc bd mol burn",
+	} {
+		if !strings.Contains(startup, want) {
+			t.Errorf("refinery startup missing %q (needed for open-wisp reconciliation parity with mol-witness-patrol)", want)
+		}
+	}
+
+	// No gc bd wisp lookup may filter the invalid --type=wisp — it matches
+	// nothing, so the reconcile silently no-ops and the leak returns (ga-7c6).
+	for _, line := range strings.Split(startup, "\n") {
+		if strings.Contains(line, "gc bd list") && strings.Contains(line, "--type=wisp") {
+			t.Errorf("refinery startup runs a gc bd list with invalid --type=wisp (matches nothing -> duplicate wisps): %q", line)
+		}
+	}
+}
+
 // TestGastownPromptRoutedToHandoffIsFullyQualifiedUnderBinding renders the
 // polecat, witness, and refinery prompt templates with a binding-aliased rig
 // (BindingPrefix="gastown.", GC_RIG="cashmaster") and shell-evaluates each
