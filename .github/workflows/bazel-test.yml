@@ -101,9 +101,11 @@ jobs:
             exit 1
           }
 
-      - name: Writable test HOME
+      - name: Writable test directories
         run: |
-          mkdir -p /tmp/gc-test-home
+          # .bazelrc makes /tmp/bt sandbox-writable; Bazel requires it
+          # to exist before any sandboxed build action starts.
+          mkdir -p /tmp/gc-test-home /tmp/bt
           echo "HOME=/tmp/gc-test-home" >> "$GITHUB_ENV"
 
       - name: bazel test //... (build subsumed)

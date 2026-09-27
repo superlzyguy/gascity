@@ -1,3 +1,4 @@
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,6 +7,21 @@ import runner_policy
 
 
 class RunnerPolicyTests(unittest.TestCase):
+    def test_bazel_creates_sandbox_writable_tmpdir_before_test(self) -> None:
+        root = Path(__file__).resolve().parents[3]
+        workflow = (root / ".github/workflows/bazel-test.yml").read_text()
+        setup = workflow.split('bazel "${ARGS[@]}" test', 1)
+        self.assertEqual(len(setup), 2, "Bazel test command must be present")
+        created = set()
+        for line in setup[0].splitlines():
+            if line.strip().startswith("mkdir -p "):
+                created.update(shlex.split(line.split("&&", 1)[0].strip())[2:])
+        self.assertIn(
+            "/tmp/bt",
+            created,
+            "--sandbox_writable_path requires /tmp/bt to exist before actions start",
+        )
+
     def test_load_allowlist_ignores_comments_and_case_normalizes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "allowlist.txt"
