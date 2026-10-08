@@ -29,6 +29,7 @@ var (
 	syncImportsSelective    = packman.SyncLockSelectiveUpgrade
 	installLockedImports    = packman.InstallLocked
 	checkInstalledImports   = packman.CheckInstalled
+	checkUpstreamImports    = packman.CheckUpstream
 	readImportLockfile      = packman.ReadLockfile
 	writeImportLockfile     = packman.WriteLockfile
 	resolveImportVersion    = packman.ResolveVersion
@@ -106,7 +107,18 @@ func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "import",
 		Short: "Manage pack imports",
-		Args:  cobra.NoArgs,
+		Long: `Manage pack imports.
+
+Freshness: "gc import check" and "gc doctor" validate import state offline --
+they answer "is what I declared installed and consistent?", never "has upstream
+moved?". A pin can be months stale and pass both. To compare each declared
+remote import against its source, run:
+
+  gc import status --check-upstream
+
+Re-pinning: "gc import upgrade" moves a pin only as far as its declared
+constraint allows, so it cannot move a "sha:" pin at all. ` + importRePinHint + `.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
@@ -257,7 +269,14 @@ func newImportUpgradeCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "upgrade [name]",
 		Short: "Upgrade imported packs within their constraints",
-		Args:  cobra.MaximumNArgs(1),
+		Long: `Upgrade imported packs within their constraints.
+
+Only within them: the declared constraint is not rewritten, so a "sha:<commit>"
+pin names a fixed commit and this command cannot move it. In that case the
+output says so rather than reporting an upgrade that did not happen.
+
+` + importRePinHint + `.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			cityPath, err := resolveImportRoot()
 			if err != nil {
@@ -686,7 +705,11 @@ func importAddErrorLine(source, nameOverride string, err error) string {
 		return "gc import add: could not derive import name; use --name"
 	case errors.Is(err, importsvc.ErrReservedPrefix):
 		return fmt.Sprintf("gc import add: import name %q uses reserved prefix \"default-rig:\"", nameOverride)
-	case errors.Is(err, importsvc.ErrScopeLoad), errors.Is(err, importsvc.ErrImportExists):
+	case errors.Is(err, importsvc.ErrImportExists):
+		// Dead-ending here was the whole complaint: the operator's next move is
+		// a re-pin, and nothing in the old line said where to make it.
+		return fmt.Sprintf("gc import add: %v; %s", err, importRePinHint)
+	case errors.Is(err, importsvc.ErrScopeLoad):
 		return fmt.Sprintf("gc import add: %v", err)
 	default:
 		// Redact any userinfo in the source so a credential-bearing URL never
@@ -848,7 +871,9 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 	}
 
 	// Resolve the repo cache root the clones below land in, so the success
-	// line can name it (see intoRepoCacheRoot).
+	// line can name it (see intoRepoCacheRoot). The pre-upgrade lock was
+	// read above: "Upgraded" is a claim about movement, and a sha: pin names
+	// a fixed commit and cannot move at all.
 	cacheRoot, err := packman.RepoCacheRoot()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import upgrade: resolving repo cache root: %v\n", err) //nolint:errcheck
@@ -856,7 +881,7 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 	}
 
 	var lock *packman.Lockfile
-	var targetSource string
+	targetSource, targetConstraint := "", ""
 	if target == "" {
 		lock, err = syncImports(cityPath, allImports, packman.InstallUpgrade)
 	} else {
@@ -874,7 +899,7 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "gc import upgrade: import %q is a path import and cannot be upgraded\n", target) //nolint:errcheck
 			return 1
 		}
-		targetSource = targetImp.Source
+		targetSource, targetConstraint = targetImp.Source, targetImp.Version
 		lock, err = syncImportsSelective(cityPath, allImports, map[string]struct{}{
 			targetImp.Source: {},
 		})
@@ -894,29 +919,106 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if target == "" {
-		total := len(lock.Packs)
-		moved := 0
-		for source, pack := range lock.Packs {
-			if prev, ok := prevLock.Packs[source]; !ok || prev.Commit != pack.Commit {
-				moved++
-			}
-		}
-		if moved == 0 {
-			fmt.Fprintf(stdout, "No import moved; %d already up to date\n", total) //nolint:errcheck
-		} else {
-			fmt.Fprintf(stdout, "Upgraded %d of %d remote import(s)%s; %d already up to date\n", moved, total, intoRepoCacheRoot(cacheRoot), total-moved) //nolint:errcheck
-		}
+		writeImportUpgradeAllSummary(stdout, prevLock, lock, cacheRoot)
 	} else {
-		pack, ok := lock.Packs[targetSource]
-		if !ok {
-			fmt.Fprintf(stdout, "Upgraded import %q%s\n", target, intoRepoCacheRoot(cacheRoot)) //nolint:errcheck
-		} else if prev, hadPrev := prevLock.Packs[targetSource]; hadPrev && prev.Commit == pack.Commit {
-			fmt.Fprintf(stdout, "Import %q already at %s\n", target, pack.Commit) //nolint:errcheck
-		} else {
-			fmt.Fprintf(stdout, "Upgraded import %q (%s)%s\n", target, pack.Commit, intoRepoCacheRoot(cacheRoot)) //nolint:errcheck
-		}
+		writeImportUpgradeTargetSummary(stdout, target, targetSource, targetConstraint, prevLock, lock, cacheRoot)
 	}
 	return 0
+}
+
+// importRePinHint names the supported way to move an import onto a different
+// commit or constraint.
+//
+// "gc import upgrade" deliberately takes no --version flag: a declaration lives
+// in whichever of the three scopes owns it (root pack [imports.*],
+// [defaults.rig.imports.*], or a rig's [rigs.imports.*]), and directing the
+// operator at the declaring file is unambiguous where a rewrite that silently
+// picked a scope would not be.
+const importRePinHint = `to re-pin, edit that import's version in the file that declares it ` +
+	`(pack.toml [imports.*] or [defaults.rig.imports.*], city.toml [imports.*], ` +
+	`or the rig's [imports.*]) and run "gc import install"`
+
+// writeImportUpgradeAllSummary reports what the all-imports sync moved. A
+// source with no prior pin counts as moved: the lock did change for it.
+func writeImportUpgradeAllSummary(stdout io.Writer, prior, current *packman.Lockfile, cacheRoot string) {
+	moved, unchanged := 0, 0
+	for source, pack := range current.Packs {
+		if before, ok := lockedImportCommit(prior, source); ok && before == pack.Commit {
+			unchanged++
+			continue
+		}
+		moved++
+	}
+	total := len(current.Packs)
+	if moved == 0 {
+		// Nothing moved, so the line must not say "Upgraded".
+		fmt.Fprintf(stdout, "No import moved; %d already up to date\n", total) //nolint:errcheck
+		return
+	}
+	fmt.Fprintf(stdout, "Upgraded %d of %d remote import(s)%s; %d already up to date\n", //nolint:errcheck
+		moved, total, intoRepoCacheRoot(cacheRoot), unchanged)
+	fmt.Fprintf(stdout, "Upgraded %d of %d remote import(s); %d unchanged.\n", //nolint:errcheck
+		moved, total, unchanged)
+}
+
+// writeImportUpgradeTargetSummary reports what the single-target sync moved.
+// Only the moved and first-locked cases may use the word "Upgraded"; saying it
+// over an unmoved pin is the false success this replaces.
+func writeImportUpgradeTargetSummary(stdout io.Writer, target, source, constraint string, prior, current *packman.Lockfile, cacheRoot string) {
+	after, hasAfter := lockedImportCommit(current, source)
+	before, hadBefore := lockedImportCommit(prior, source)
+	cache := intoRepoCacheRoot(cacheRoot)
+	switch {
+	case !hadBefore:
+		// First resolution for this source. There is no prior commit to move
+		// from, so this is a lock rather than an upgrade; rendering it as
+		// `"" -> abc1234` would invent a move that never happened. The cache
+		// suffix matches the install line.
+		if hasAfter {
+			fmt.Fprintf(stdout, "Upgraded import %q (%s)%s\n", target, after, cache) //nolint:errcheck
+		} else {
+			fmt.Fprintf(stdout, "Upgraded import %q%s\n", target, cache) //nolint:errcheck
+		}
+	case before != after:
+		fmt.Fprintf(stdout, "Upgraded import %q: %s -> %s%s\n", //nolint:errcheck
+			target, shortImportCommit(before), shortImportCommit(after), cache)
+	case strings.HasPrefix(constraint, "sha:"):
+		fmt.Fprintf(stdout, "Import %q is unchanged: constraint %q pins a fixed commit, so there is nothing to upgrade.\n", //nolint:errcheck
+			target, constraint)
+		// The sync did rewrite pin.fetched. Saying so is the difference
+		// between "nothing happened" and "something happened that was not an
+		// upgrade" -- an operator who sees packs.lock change otherwise has
+		// been told the opposite of what the file shows.
+		fmt.Fprintf(stdout, "Its packs.lock fetched timestamp was refreshed; commit %s did not change.\n", //nolint:errcheck
+			shortImportCommit(after))
+		fmt.Fprintf(stdout, "%s\n", importRePinHint) //nolint:errcheck
+	default:
+		fmt.Fprintf(stdout, "Import %q already at %s\n", target, after) //nolint:errcheck
+		version, _ := lockedImportVersion(current, source)
+		if constraint == "" {
+			fmt.Fprintf(stdout, "Import %q is already at the highest available version (%s).\n", //nolint:errcheck
+				target, version)
+		} else {
+			fmt.Fprintf(stdout, "Import %q is already at the highest version matching %q (%s).\n", //nolint:errcheck
+				target, constraint, version)
+		}
+	}
+}
+
+func lockedImportCommit(lock *packman.Lockfile, source string) (string, bool) {
+	if lock == nil {
+		return "", false
+	}
+	pack, ok := lock.Packs[source]
+	return pack.Commit, ok
+}
+
+func lockedImportVersion(lock *packman.Lockfile, source string) (string, bool) {
+	if lock == nil {
+		return "", false
+	}
+	pack, ok := lock.Packs[source]
+	return pack.Version, ok
 }
 
 func doImportList(cityPath string, tree bool, stdout, stderr io.Writer) int {
