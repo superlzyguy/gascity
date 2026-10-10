@@ -46,7 +46,7 @@ func TestUpstreamFreshnessSeesWhatCheckInstalledCannot(t *testing.T) {
 
 	// Same unchanged on-disk state. Only upstream has moved.
 	stubUpstreamNetworkGit(t, func([]string) (string, error) {
-		return symrefHeadResponse("refs/heads/main", upstreamMovedHead), nil
+		return symrefHeadResponse(upstreamMovedHead), nil
 	})
 
 	report, err := CheckUpstream(city, imports, nil)
@@ -124,7 +124,7 @@ func TestCheckUpstreamResolvesEachConstraintKind(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			city := newUpstreamFixtureCity(t)
 			stubUpstreamNetworkGit(t, func(args []string) (string, error) {
-				return upstreamFixtureResponse(args, symrefHeadResponse("refs/heads/main", upstreamLockedHead), tags)
+				return upstreamFixtureResponse(args, symrefHeadResponse(upstreamLockedHead), tags)
 			})
 			writeTestLockfile(t, city, map[string]LockedPack{
 				upstreamToolsSource: {Version: tt.constraint, Commit: tt.locked},
@@ -207,7 +207,7 @@ func TestCheckUpstreamTreatsFileSourceAsRemote(t *testing.T) {
 	city := newUpstreamFixtureCity(t)
 	pathSource := writeLocalPack(t, "[pack]\nname = \"local\"\nschema = 1\n")
 	calls := stubUpstreamNetworkGit(t, func([]string) (string, error) {
-		return symrefHeadResponse("refs/heads/main", upstreamMovedHead), nil
+		return symrefHeadResponse(upstreamMovedHead), nil
 	})
 	writeTestLockfile(t, city, map[string]LockedPack{
 		"file:///srv/pack": {Version: "sha:" + upstreamLockedHead, Commit: upstreamLockedHead},
@@ -303,7 +303,7 @@ func TestCheckUpstreamReportsResolutionFailureUnreachable(t *testing.T) {
 		if strings.Contains(strings.Join(args, " "), "dead.git") {
 			return "", authErr
 		}
-		return symrefHeadResponse("refs/heads/main", upstreamLockedHead), nil
+		return symrefHeadResponse(upstreamLockedHead), nil
 	})
 	writeTestLockfile(t, city, map[string]LockedPack{
 		"https://example.com/dead.git": {Version: "sha:" + upstreamLockedHead, Commit: upstreamLockedHead},
@@ -349,7 +349,7 @@ func TestCheckUpstreamMemoizesByCloneURL(t *testing.T) {
 	)
 	city := newUpstreamFixtureCity(t)
 	calls := stubUpstreamNetworkGit(t, func([]string) (string, error) {
-		return symrefHeadResponse("refs/heads/main", upstreamMovedHead), nil
+		return symrefHeadResponse(upstreamMovedHead), nil
 	})
 	writeTestLockfile(t, city, map[string]LockedPack{
 		bdSource:   {Version: "sha:" + upstreamLockedHead, Commit: upstreamLockedHead},
@@ -456,8 +456,8 @@ func upstreamFixtureResponse(args []string, symref, tags string) (string, error)
 	return "", fmt.Errorf("unexpected git invocation: %s", joined)
 }
 
-func symrefHeadResponse(ref, commit string) string {
-	return fmt.Sprintf("ref: %s\tHEAD\n%s\tHEAD\n", ref, commit)
+func symrefHeadResponse(commit string) string {
+	return fmt.Sprintf("ref: refs/heads/main\tHEAD\n%s\tHEAD\n", commit)
 }
 
 func findUpstreamStatus(t *testing.T, report *UpstreamReport, name string) UpstreamStatus {
