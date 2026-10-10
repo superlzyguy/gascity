@@ -302,6 +302,18 @@ go_deps.module(
 # oapi-codegen v2.6.0's requirements absent from gc's go.mod.
 go_deps.module(
     indirect = True,
+    path = "github.com/mailru/easyjson",
+    sum = "h1:UGYAvKxe3sBsEDzO8ZeWOSlIQfWFlxbzLZe7hwFURr0=",
+    version = "v0.7.7",
+)
+go_deps.module(
+    indirect = True,
+    path = "github.com/josharian/intern",
+    sum = "h1:vlS4z54oSdjm0bgjRigI+G1HpF+tI+9rE5LLzOg8HmY=",
+    version = "v1.0.0",
+)
+go_deps.module(
+    indirect = True,
     path = "github.com/getkin/kin-openapi",
     sum = "h1:pJdmNohVIJ97r4AUFtEXRXwESr8b0bD721u/Tz6k8PQ=",
     version = "v0.133.0",
