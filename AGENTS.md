@@ -176,6 +176,14 @@ to a regular file). Doctor must not create a root instruction file when that
 project-memory file exists. Custom filenames and other provider families keep
 their declared expectations.
 
+This deployment fork links the production Beads source pin at schema 69/27.
+Both cursor constants and the ignored-lane sentinel policy must match that
+exact module. The similarly named published release uses another schema and
+sentinel policy. Keep the structural drift tests enabled when changing the
+dependency; do not infer compatibility from the version label or update only
+the main cursor. The generic floored-table probe tests use a synthetic policy
+because the current production source pin does not declare floored tables.
+
 ## Key design principles
 
 - **Keep judgment out of Go.** Go handles transport, not reasoning. The
