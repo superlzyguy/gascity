@@ -364,19 +364,14 @@ version = "^9.9"
 	return dir
 }
 
-// stubCheckUpstreamImports swaps the freshness seam for a fixed report and
-// returns a pointer to the call count, so a test can assert the seam was not
-// reached at all.
-func stubCheckUpstreamImports(t *testing.T, statuses ...packman.UpstreamStatus) *int {
+// stubCheckUpstreamImports swaps the freshness seam for a fixed report.
+func stubCheckUpstreamImports(t *testing.T, statuses ...packman.UpstreamStatus) {
 	t.Helper()
-	calls := 0
 	prev := checkUpstreamImports
 	t.Cleanup(func() { checkUpstreamImports = prev })
 	checkUpstreamImports = func(_ string, _ map[string]config.Import, _ *packman.Lockfile) (*packman.UpstreamReport, error) {
-		calls++
 		return &packman.UpstreamReport{Checked: len(statuses), Statuses: statuses}, nil
 	}
-	return &calls
 }
 
 func upstreamStatusEntry(t *testing.T, doc *ImportStatusJSON, name string) ImportStatusEntry {
