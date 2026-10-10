@@ -25,10 +25,7 @@ go_test(
     embed = [":gchome"],
     # These tests validate real ancestor ownership. Linux sandbox user
     # namespaces map the host's root-owned directories to UID 65534.
-    tags = [
-        "no-remote-exec",
-        "no-sandbox",
-    ],
+    tags = ["no-sandbox"],
     deps = ["//internal/testenv"],
 )
 
