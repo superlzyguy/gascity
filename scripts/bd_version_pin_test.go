@@ -48,29 +48,23 @@ func TestBDVersionPins(t *testing.T) {
 	if !regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`).MatchString(bdCurrent) {
 		t.Fatalf("deps.env BD_CURRENT_VERSION = %q, want a semver token", bdCurrent)
 	}
-	// The native Go store, the bleeding-edge contract-matrix cell, and the
-	// source-built agent image must all use the same upstream beads. A drift here
-	// can pair one schema catalog with another version's write behavior.
-	//
-	// The pin takes one of two shapes and both are checked, because upstream
-	// alternates between them: a pseudo-version, whose embedded 12-char commit
-	// must be BD_CURRENT_REF; or an exact release/prerelease tag, which must be
-	// BD_CURRENT_VERSION verbatim (BD_CURRENT_REF is then that tag's commit, which
-	// only the network could confirm -- the same trust boundary the pseudo-version
-	// form already had for its timestamp).
+	// The deployment fork links the production schema-69 source, while the
+	// published-release compatibility matrix keeps its original tag commits.
+	// Its explicit native pin must be a full SHA and must match go.mod; neither
+	// a moving branch nor the release archive's identity is a native substitute.
+	nativeRef := env["BD_NATIVE_REF"]
+	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(nativeRef) {
+		t.Fatalf("deps.env BD_NATIVE_REF = %q, want a full production beads commit SHA", nativeRef)
+	}
 	goMod := readFile(t, root, "go.mod")
 	goModMatch := regexp.MustCompile(`(?m)^\s*github\.com/steveyegge/beads\s+(v\S+)\s*$`).FindStringSubmatch(goMod)
 	if goModMatch == nil {
 		t.Fatal("go.mod missing a version pin for github.com/steveyegge/beads")
 	}
 	goModPin := goModMatch[1]
-	if pseudo := regexp.MustCompile(`-([0-9a-f]{12})$`).FindStringSubmatch(goModPin); pseudo != nil {
-		if got, want := pseudo[1], bdCurrentRef[:12]; got != want {
-			t.Fatalf("go.mod beads pseudo-version commit = %q, want BD_CURRENT_REF prefix %q", got, want)
-		}
-	} else if goModPin != bdCurrent {
-		t.Fatalf("go.mod pins github.com/steveyegge/beads to the tag %q but deps.env BD_CURRENT_VERSION = %q; a tag pin must name the same release the current matrix cell builds",
-			goModPin, bdCurrent)
+	pseudo := regexp.MustCompile(`-([0-9a-f]{12})$`).FindStringSubmatch(goModPin)
+	if pseudo == nil || pseudo[1] != nativeRef[:12] {
+		t.Fatalf("go.mod beads pin = %q, want pseudo-version for BD_NATIVE_REF %q", goModPin, nativeRef)
 	}
 	// The integration suite installs bd from whatever go.mod names and pins the
 	// expected version in its own literal, so a bump that misses that literal
@@ -78,7 +72,7 @@ func TestBDVersionPins(t *testing.T) {
 	// `rest-full` shard, which is gated on `push` — so on a PR nothing catches
 	// the drift and the failure lands after merge, which is exactly how
 	// v1.3.0-rc.2 stayed stale there (tracker ga-rnwg5u). Assert it here,
-	// against the same go.mod pin the block above ties to deps.env. This test
+	// against the same go.mod pin the block above ties to BD_NATIVE_REF. This test
 	// reaches PR-time CI through //scripts:scripts_test in the required Bazel
 	// lane, so drift fails before merge rather than after.
 	const integrationPinFile = "test/integration/integration_test.go"

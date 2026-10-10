@@ -150,9 +150,9 @@ func TestIgnoredSentinelsMatchPinnedBeads(t *testing.T) {
 }
 
 // pinnedCursorRealityFloorDigest is cursorRealityFloorDigest at the pinned
-// beads (v1.3.1, internal/storage/schema/schema.go: sentinel tables floor at 0
-// and short-circuit, then floored tables and columns clamp to the lowest
-// replayFloor of anything absent).
+// beads source 8bb99b49d8cb, internal/storage/schema/schema.go: sentinel
+// tables floor at 0 and short-circuit, then columns clamp to the lowest
+// replayFloor of anything absent. This pin has no floored-table policy.
 const pinnedCursorRealityFloorDigest = "65993bb205e8911af8e696360952bd16c8d8388a5db7c23c427e63e97dc14533"
 
 // TestSentinelDriftPinSeesEveryDirection proves the pin above is structural by

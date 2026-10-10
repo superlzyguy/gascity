@@ -315,3 +315,10 @@ Before considering any task complete:
 - Every exported function has a doc comment
 - No premature abstractions
 - Tests cover happy path AND edge cases
+
+The deployment fork records its linked production Beads commit as
+`BD_NATIVE_REF` in `deps.env`. Keep that pin, `go.mod`, and the integration
+module-version assertion aligned. `BD_CURRENT_REF` remains the published
+release compatibility cell and its archive identity must not be relabeled
+as the production source. The superlzy image pins the same native source
+for both its standalone `bd` and the library linked into `gc`.
