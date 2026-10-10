@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -2259,7 +2260,10 @@ func TestBuildPodServiceAccount(t *testing.T) {
 func TestInitCityInPodSkipsDolt(t *testing.T) {
 	fake := newFakeK8sOps()
 
-	err := initCityInPod(context.Background(), fake, "gc-mayor", "/city")
+	// This test checks init flags, not archive staging. Keep the source absent
+	// explicitly instead of depending on whether /city exists on the host.
+	cityDir := filepath.Join(t.TempDir(), "missing-city")
+	err := initCityInPod(context.Background(), fake, "gc-mayor", cityDir)
 	if err != nil {
 		t.Fatalf("initCityInPod: %v", err)
 	}
